@@ -1,0 +1,29 @@
+# Local files
+/.research/
+/third_party/
+/media/
+/output/
+/tools/
+/palettes/
+*.rhm
+*.sspm
+*.rhc
+*-colorset.txt
+*.mp4
+*.mp3
+*.wav
+
+# Build outputs
+/build*/
+/cmake-build-*/
+/out/
+/test-fixtures-*/
+.mp42rhm-*/
+.rhm2mp4-*/
+
+# Editor and runtime files
+.vs/
+.idea/
+CMakeUserPresets.json
+*.log
+*.dmp
