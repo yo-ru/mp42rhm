@@ -32,6 +32,7 @@ namespace mp42rhm {
     double span = 0;
     bool invert = false;
     bool audio = true;
+    bool experimental_cuda = false;
   };
 
   struct Statistics {

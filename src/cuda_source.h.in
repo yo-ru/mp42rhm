@@ -1,0 +1,5 @@
+#pragma once
+
+namespace mp42rhm {
+  static constexpr char CUDA_SOURCE[] = R"cuda(@CUDA_SOURCE@)cuda";
+}

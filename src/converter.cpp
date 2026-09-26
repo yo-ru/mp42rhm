@@ -1,4 +1,5 @@
 #include "converter.h"
+#include "cuda_brush.h"
 #include "archive.h"
 #include "process.h"
 #include "note_order.h"
@@ -14,6 +15,7 @@
 #include <cstring>
 #include <fstream>
 #include <future>
+#include <deque>
 #include <iomanip>
 #include <iostream>
 #include <locale>
@@ -93,6 +95,8 @@ namespace mp42rhm {
       throw std::runtime_error("FPS must be between 1 and 60");
     if (options.brush_size < 1 || options.brush_size > 64)
       throw std::runtime_error("Brush size must be between 1 and 64");
+    if (options.experimental_cuda && (options.mode == ColorMode::Bw || options.brush_size != 32))
+      throw std::runtime_error("--experimental-cuda requires color or grayscale mode with 32-pixel brushes");
     if (options.brush_size > 1 && options.mode == ColorMode::Bw)
       throw std::runtime_error("--brush-size requires color or grayscale mode");
     if (options.threshold > 255 || options.max_notes == 0)
@@ -317,11 +321,6 @@ namespace mp42rhm {
     output.close();
   }
 
-  struct BrushStroke {
-    int32_t x, y;
-    uint32_t color;
-  };
-
   static std::vector<BrushStroke> compact_brush_strokes(const std::vector<BrushStroke>& strokes,
     const std::vector<uint8_t>& pixels, const Options& options) {
     const int32_t brush = static_cast<int32_t>(options.brush_size), margin = brush * 2;
@@ -456,7 +455,7 @@ namespace mp42rhm {
   }
 
   static std::vector<BrushStroke> paint_frame(const std::vector<uint8_t>& pixels, const Options& options,
-    const PaletteCycle& palette) {
+    const PaletteCycle& palette, CudaBrushEncoder* cuda = nullptr) {
     const int32_t brush = static_cast<int32_t>(options.brush_size);
     auto colors = palette.colors;
     const auto background = static_cast<uint8_t>(colors.size());
@@ -540,6 +539,8 @@ namespace mp42rhm {
       }
       candidates.push_back(std::move(strokes));
     }
+    if (cuda)
+      return cuda->compact(candidates, pixels);
     const size_t workers = std::max(1U, std::min(4U, std::thread::hardware_concurrency()));
 
     for (size_t begin = 0; begin < candidates.size(); begin += workers) {
@@ -561,6 +562,12 @@ namespace mp42rhm {
 
   Statistics convert(const Options& options) {
     validate(options);
+    std::unique_ptr<CudaBrushEncoder> cuda;
+
+    if (options.experimental_cuda) {
+      cuda = std::make_unique<CudaBrushEncoder>(options);
+      std::cerr << "Experimental CUDA: " << cuda->parallel_frames() << " frames in flight.\n";
+    }
 
     TemporaryDirectory temporary(fs::absolute(options.output).parent_path());
     const auto archive_path = temporary.path / options.output.filename();
@@ -705,7 +712,10 @@ namespace mp42rhm {
       positions.push_back(position);
     }
 
-    while (true) {
+    std::deque<std::shared_future<std::vector<BrushStroke>>> jobs;
+    std::shared_future<std::vector<BrushStroke>> last_job;
+    bool decode_finished = false;
+    const auto read_frame = [&] {
       size_t received = 0;
 
       while (received < pixels.size()) {
@@ -715,10 +725,32 @@ namespace mp42rhm {
           break;
         received += count;
       }
-      if (received == 0)
-        break;
-      if (received != pixels.size())
+      if (received && received != pixels.size())
         throw std::runtime_error("FFmpeg returned a truncated video frame");
+      return received != 0;
+    };
+
+    while (true) {
+      if (cuda) {
+        while (jobs.size() < cuda->parallel_frames() && !decode_finished) {
+          if (!read_frame()) {
+            decode_finished = true;
+            break;
+          }
+          if (pixels != previous_pixels) {
+            last_job = std::async(std::launch::async, [&, frame = pixels] {
+              return paint_frame(frame, options, palette, cuda.get());
+            }).share();
+            previous_pixels = pixels;
+          }
+          jobs.push_back(last_job);
+        }
+        if (jobs.empty())
+          break;
+        previous_strokes = jobs.front().get();
+        jobs.pop_front();
+      } else if (!read_frame())
+        break;
 
       // Hit times mark frame ends because notes approach before they are hit
       const int32_t time = frame_time(statistics.frames + 1, options.fps);
@@ -743,7 +775,7 @@ namespace mp42rhm {
 
       frame_json.clear();
       if (brush_mode) {
-        if (pixels != previous_pixels) {
+        if (!cuda && pixels != previous_pixels) {
           previous_strokes = paint_frame(pixels, options, palette);
           previous_pixels = pixels;
         }

@@ -26,6 +26,7 @@ static void usage(bool all) {
     "  --format sspm|rhm       Map format (SSPM v2)\n"
     "  --difficulty-name TEXT  Difficulty label\n"
     "  --brush-size N          Brush pixels (bw: 1, gray/color: 8)\n"
+    "  --experimental-cuda     NVIDIA encoder (32-pixel brushes)\n"
     "  --span N                Image width (default: width * 0.01)\n"
     "  --palette-cycle PATH    Custom color palette\n"
     "  --threshold N           Black/white threshold (128)\n"
@@ -101,6 +102,10 @@ int wmain(int argc, wchar_t** argv) {
         options.audio = false;
         continue;
       }
+      if (key == L"--experimental-cuda") {
+        options.experimental_cuda = true;
+        continue;
+      }
       const auto value = [&]() {
         if (++i == argc)
           throw std::runtime_error("Missing value for " + utf8(key));
@@ -174,7 +179,7 @@ int wmain(int argc, wchar_t** argv) {
     if (!mode_set && !options.palette_cycle.empty())
       options.mode = mp42rhm::ColorMode::Color;
     if (!brush_set && options.mode != mp42rhm::ColorMode::Bw)
-      options.brush_size = 8;
+      options.brush_size = options.experimental_cuda ? 32 : 8;
     if (options.colorset.empty())
       options.colorset = options.output.parent_path() / (options.output.stem().wstring() + L"-colorset.txt");
     mp42rhm::validate(options);

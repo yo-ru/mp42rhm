@@ -12,9 +12,13 @@ FetchContent_Declare(rhmparse
 )
 FetchContent_MakeAvailable(rhmparse)
 
-add_library(converter src/converter.cpp src/process.cpp src/archive.cpp src/note_order.cpp)
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/cuda_brush.cu)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda_brush.cu" CUDA_SOURCE)
+configure_file(src/cuda_source.h.in generated/cuda_source.h @ONLY)
+
+add_library(converter src/converter.cpp src/process.cpp src/archive.cpp src/note_order.cpp src/cuda_brush.cpp)
 target_compile_features(converter PUBLIC cxx_std_17)
-target_include_directories(converter PUBLIC src PRIVATE ${rhmparse_SOURCE_DIR}/src)
+target_include_directories(converter PUBLIC src PRIVATE ${rhmparse_SOURCE_DIR}/src "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_compile_definitions(converter PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(converter PRIVATE rhmParse::rhmParse bcrypt)
 

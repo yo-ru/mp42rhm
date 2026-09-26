@@ -26,6 +26,8 @@ Add `--seconds 5` for a preview. Defaults: black and white, 160x90, 12 fps, 100 
 
 `--help` lists common controls. `--help-all` lists every option.
 
+`--experimental-cuda` enables NVIDIA acceleration for color/grayscale and defaults to 32-pixel brushes. Other brush sizes are unsupported. Requires an NVIDIA driver and CUDA 12/13 NVRTC with its matching builtins DLL beside the executable or on PATH. Frame batching adjusts to available VRAM; CPU encoding remains the default.
+
 ## Encoding
 
 1. FFmpeg decodes frames at the requested FPS and fits them to the output resolution, preserving aspect ratio with padding.

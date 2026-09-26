@@ -487,9 +487,9 @@ int main(int argc, char** argv) {
       L"-i", brush_raw.wstring(), L"-c:v", L"libx264rgb", L"-crf", L"0", L"-preset", L"ultrafast", brush_video.wstring()});
 
     brush_fixture.finish();
-    for (unsigned variant = 0; variant < 6; ++variant) {
+    for (unsigned variant = 0; variant < 8; ++variant) {
       const auto format = variant % 2 ? mp42rhm::Format::Rhm : mp42rhm::Format::Sspm;
-      const uint32_t brush = std::array<uint32_t, 3>{3, 8, 64}[variant / 2];
+      const uint32_t brush = std::array<uint32_t, 4>{3, 8, 32, 64}[variant / 2];
       const int margin = brush * 2, canvas_width = 13 + margin * 2, canvas_height = 9 + margin * 2;
       const size_t canvas_size = size_t(canvas_width) * canvas_height;
       auto brush_options = compensated_options;
@@ -552,6 +552,39 @@ int main(int argc, char** argv) {
             }
             require(canvas[frame * canvas_size + y * canvas_width + x] == expected, "Brush repaint changed pixels or left edge spill");
           }
+      if (brush == 32 && argc == 2 && std::string(argv[1]) == "--cuda") {
+        auto gpu_options = brush_options;
+
+        gpu_options.experimental_cuda = true;
+        gpu_options.output = directory / (name + "-cuda" + (format == mp42rhm::Format::Sspm ? ".sspm" : ".rhm"));
+        gpu_options.colorset = directory / (name + "-cuda.txt");
+        const auto gpu_stats = mp42rhm::convert(gpu_options);
+        const auto gpu_map = format == mp42rhm::Format::Sspm ? read_sspm_v2(gpu_options.output) : read_map(gpu_options.output);
+
+        require(gpu_stats.frames == stats.frames && gpu_stats.notes == stats.notes &&
+          gpu_stats.peak_frame_notes == stats.peak_frame_notes, "CUDA frame/note counts differ from CPU");
+        require(gpu_map.map.notes.size() == generated.map.notes.size(), "CUDA map note count differs from CPU");
+        for (size_t i = 0; i < generated.map.notes.size(); ++i) {
+          const auto& expected = generated.map.notes[i];
+          const auto& actual = gpu_map.map.notes[i];
+
+          require(actual.x == expected.x && actual.y == expected.y && actual.time == expected.time,
+            "CUDA note placement or ordering differs from CPU");
+        }
+        std::ifstream gpu_colors(gpu_options.colorset);
+
+        for (const auto color : rgb) {
+          require(bool(std::getline(gpu_colors, line)), "CUDA colorset is truncated");
+          require(mp42rhm::parse_color(line) == color, "CUDA colorset differs from CPU");
+        }
+        require(!std::getline(gpu_colors, line), "CUDA colorset has extra entries");
+        gpu_colors.close();
+        gpu_options.output = directory / (name + "-cuda-budget" + (format == mp42rhm::Format::Sspm ? ".sspm" : ".rhm"));
+        gpu_options.colorset = directory / (name + "-cuda-budget.txt");
+        gpu_options.max_notes = stats.notes - 1;
+        must_fail([&] { mp42rhm::convert(gpu_options); });
+        require(!fs::exists(gpu_options.output) && !fs::exists(gpu_options.colorset), "Published partial CUDA export");
+      }
       brush_options.output = directory / (name + "-budget" + (format == mp42rhm::Format::Sspm ? ".sspm" : ".rhm"));
       brush_options.colorset = directory / (name + "-budget.txt");
       brush_options.max_notes = stats.notes - 1;
