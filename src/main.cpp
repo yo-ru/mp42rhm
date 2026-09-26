@@ -5,28 +5,35 @@
 #include <iostream>
 #include <stdexcept>
 
-static void usage() {
+static void usage(bool all) {
   std::cout <<
     "Video maps for Steam Rhythia\n"
     "Usage: mp42rhm input.mp4 output [options]\n\n"
-    "  --format sspm|rhm       Map format (SSPM v2)\n"
     "  --mode MODE             bw, grayscale, color (bw)\n"
-    "  --colors N              Palette size (gray: 4, color: 32)\n"
-    "  --title TEXT            Map title\n"
+    "  --width N --height N    Resolution (160x90)\n"
+    "  --fps N                 Frame rate (12)\n"
+    "  --colors N              Palette size (gray: 4, color: 64)\n"
+    "  --seconds N             Clip duration (full video)\n"
+    "  --max-notes N           Note budget (100000000)\n"
+    "  --title TEXT            Map title\n";
+
+  if (!all) {
+    std::cout << "\nAll options: mp42rhm --help-all\n";
+    return;
+  }
+  std::cout <<
+    "\nAdvanced:\n"
+    "  --format sspm|rhm       Map format (SSPM v2)\n"
     "  --difficulty-name TEXT  Difficulty label\n"
-    "  --width N               Width (160)\n"
-    "  --height N              Height (90)\n"
-    "  --fps N                 Frame rate (60)\n"
+    "  --brush-size N          Brush pixels (bw: 1, gray/color: 8)\n"
+    "  --span N                Image width (default: width * 0.01)\n"
+    "  --palette-cycle PATH    Custom color palette\n"
     "  --threshold N           Black/white threshold (128)\n"
     "  --invert                Invert brightness\n"
-    "  --colorset PATH         Colorset output (<output>-colorset.txt)\n"
-    "  --palette-cycle PATH    Custom color palette\n"
     "  --background HEX        Background color (000000)\n"
     "  --start SECONDS         Clip start (0)\n"
-    "  --seconds N             Clip duration (0 = full video)\n"
-    "  --span N                Image width (default: width * 0.01)\n"
-    "  --max-notes N           Note limit (5000000)\n"
     "  --no-audio              Exclude audio\n"
+    "  --colorset PATH         Colorset output (<output>-colorset.txt)\n"
     "  --ffmpeg PATH           FFmpeg executable\n"
     "  --ffprobe PATH          ffprobe executable\n";
 }
@@ -68,8 +75,8 @@ static std::string utf8(const std::wstring& value) {
 
 int wmain(int argc, wchar_t** argv) {
   try {
-    if (argc == 2 && std::wstring(argv[1]) == L"--help") {
-      usage();
+    if (argc == 2 && (std::wstring(argv[1]) == L"--help" || std::wstring(argv[1]) == L"--help-all")) {
+      usage(std::wstring(argv[1]) == L"--help-all");
       return 0;
     }
     if (argc < 3) {
@@ -79,6 +86,7 @@ int wmain(int argc, wchar_t** argv) {
 
     mp42rhm::Options options;
     bool mode_set = false;
+    bool brush_set = false;
 
     options.input = argv[1];
     options.output = argv[2];
@@ -130,7 +138,10 @@ int wmain(int argc, wchar_t** argv) {
         options.height = static_cast<uint32_t>(integer(value(), 1080));
       else if (key == L"--fps")
         options.fps = static_cast<uint32_t>(integer(value(), 60));
-      else if (key == L"--threshold")
+      else if (key == L"--brush-size") {
+        options.brush_size = static_cast<uint32_t>(integer(value(), 64));
+        brush_set = true;
+      } else if (key == L"--threshold")
         options.threshold = static_cast<uint32_t>(integer(value(), 255));
       else if (key == L"--max-notes")
         options.max_notes = integer(value(), UINT64_MAX);
@@ -162,6 +173,8 @@ int wmain(int argc, wchar_t** argv) {
       options.output += options.format == mp42rhm::Format::Sspm ? L".sspm" : L".rhm";
     if (!mode_set && !options.palette_cycle.empty())
       options.mode = mp42rhm::ColorMode::Color;
+    if (!brush_set && options.mode != mp42rhm::ColorMode::Bw)
+      options.brush_size = 8;
     if (options.colorset.empty())
       options.colorset = options.output.parent_path() / (options.output.stem().wstring() + L"-colorset.txt");
     mp42rhm::validate(options);
@@ -169,15 +182,17 @@ int wmain(int argc, wchar_t** argv) {
     std::cerr << "Converting " << options.width << 'x' << options.height << " at " << options.fps << " fps...\n";
 
     const auto result = mp42rhm::convert(options);
-    const double note_scale = options.span == 0 ? 0.01 : options.span / options.width;
+    const double note_scale = (options.span == 0 ? 0.01 : options.span / options.width) * options.brush_size;
     // Round AR up to avoid overlapping quantized video frames
     const double approach_rate = std::ceil(1000.0 / (1000 / options.fps)) / 100;
 
     std::cout << "Exported " << result.frames << " frames, " << result.notes
       << " notes (peak " << result.peak_frame_notes << "/frame).\n\n"
       << "Steam Rhythia settings:\n"
-      << "  Note Scale: " << note_scale << '\n'
-      << "  AR: " << approach_rate << '\n'
+      << "  Note Scale: " << note_scale << '\n';
+    if (options.brush_size > 1)
+      std::cout << "  Note Opacity: 100%\n  Fade Length: 0\n";
+    std::cout << "  AR: " << approach_rate << '\n'
       << "  SD: 0.01\n"
       << "  Background (R, G, B): " << ((options.background >> 16) & 255) << ", "
       << ((options.background >> 8) & 255) << ", " << (options.background & 255) << '\n'

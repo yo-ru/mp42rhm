@@ -23,9 +23,10 @@ namespace mp42rhm {
     std::wstring ffprobe = L"ffprobe.exe";
     uint32_t width = 160;
     uint32_t height = 90;
-    uint32_t fps = 60;
+    uint32_t fps = 12;
+    uint32_t brush_size = 1;
     uint32_t threshold = 128;
-    uint64_t max_notes = 5000000;
+    uint64_t max_notes = 100000000;
     double start = 0;
     double seconds = 0;
     double span = 0;

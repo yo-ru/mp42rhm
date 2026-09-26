@@ -15,16 +15,28 @@ ctest --test-dir build -C Release --output-on-failure
 ## Usage
 
 ```powershell
-.\build\Release\mp42rhm.exe video.mp4 output --mode bw
-.\build\Release\mp42rhm.exe video.mp4 output --mode grayscale
-.\build\Release\mp42rhm.exe video.mp4 output --mode color --colors 32
-.\build\Release\mp42rhm.exe --help
+.\build\Release\mp42rhm.exe video.mp4 bw
+.\build\Release\mp42rhm.exe video.mp4 gray --mode grayscale
+.\build\Release\mp42rhm.exe video.mp4 color --mode color
 ```
 
-Writes `output.sspm` and `output-colorset.txt`. Use `--format rhm` for RHM.
+Writes `<output>.sspm` and `<output>-colorset.txt`, with audio embedded in the map. Use `--format rhm` for RHM.
 
-Defaults: black and white, 160x90, 60 fps, 5 million notes. Adjust with `--width`, `--height`, `--fps`, and `--max-notes`.
+Add `--seconds 5` for a preview. Defaults: black and white, 160x90, 12 fps, 100 million notes. Color uses up to 64 colors; grayscale uses 4 levels. Both use 8-pixel brushes.
+
+`--help` lists common controls. `--help-all` lists every option.
+
+## Encoding
+
+1. FFmpeg decodes frames at the requested FPS and fits them to the output resolution, preserving aspect ratio with padding.
+2. Black and white uses a brightness threshold. Grayscale uses fixed levels; color uses a generated or supplied palette, without dithering.
+3. Frames become simultaneous square notes. Color/grayscale brush mode compares 16 painting orders, repositions overlapping squares, and removes redundant strokes. It preserves the pixels after scaling and palette conversion; deeper optimization takes longer to encode.
+4. Note order is compensated for Steam's sorting and reverse draw order. Notes and MP3 audio are packaged as SSPM v2 or RHM.
+
+Brush colorsets contain one line per note. `--colors` controls unique palette colors, not the number of lines.
 
 ## Playback
 
 Apply the printed Note Scale, AR, SD, background RGB, and colorset. Use solid square notes, 1x speed, and Visualize (Auto).
+
+Brush maps require Note Opacity 100% and Fade Length 0.

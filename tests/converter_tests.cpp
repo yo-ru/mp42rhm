@@ -9,8 +9,10 @@
 
 #include <algorithm>
 #include <array>
+#include <cmath>
 #include <cstring>
 #include <fstream>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <stdexcept>
@@ -168,6 +170,41 @@ int main(int argc, char** argv) {
 
     mp42rhm::Options options;
 
+    require(options.fps == 12 && options.max_notes == 100000000, "Full-video defaults changed");
+    const auto executable = fs::absolute(argv[0]).parent_path() / L"mp42rhm.exe";
+    const auto cli_video = directory / L"cli.mp4";
+    mp42rhm::Process cli_fixture({L"ffmpeg.exe", L"-hide_banner", L"-loglevel", L"error", L"-nostdin",
+      L"-f", L"lavfi", L"-i", L"color=c=white:s=16x16:r=24:d=0.25",
+      L"-c:v", L"libx264rgb", L"-crf", L"0", cli_video.wstring()});
+
+    cli_fixture.finish();
+    for (const auto mode : {L"bw", L"grayscale", L"color"}) {
+      const auto base = directory / (std::wstring(L"cli-") + mode);
+      std::vector<std::wstring> arguments{executable.wstring(), cli_video.wstring(), base.wstring()};
+
+      if (std::wstring(mode) != L"bw")
+        arguments.insert(arguments.end(), {L"--mode", mode});
+      mp42rhm::Process command(arguments);
+      const auto output = command.finish();
+      const auto generated = read_sspm_v2(base.wstring() + L".sspm");
+      const auto scale = std::wstring(mode) == L"bw" ? "Note Scale: 0.01" : "Note Scale: 0.08";
+
+      require(output.find("Exported 3 frames") != std::string::npos && output.find(scale) != std::string::npos,
+        "CLI frame rate or automatic brush default changed");
+      require(!generated.map.notes.empty() && fs::exists(base.wstring() + L"-colorset.txt"), "Missing default CLI outputs");
+      for (const auto& note : generated.map.notes)
+        require(note.time == 83 || note.time == 167 || note.time == 250, "Default CLI timing");
+    }
+    const auto overridden = directory / L"cli-overridden.rhm";
+    mp42rhm::Process override_command({executable.wstring(), cli_video.wstring(), overridden.wstring(),
+      L"--mode", L"color", L"--brush-size", L"1", L"--colors", L"4", L"--fps", L"24",
+      L"--width", L"32", L"--height", L"18", L"--format", L"rhm"});
+    const auto override_output = override_command.finish();
+
+    require(override_output.find("Exported 6 frames") != std::string::npos &&
+      override_output.find("Note Scale: 0.01") != std::string::npos, "CLI defaults overrode explicit options");
+    require(!read_map(overridden).map.notes.empty(), "Explicit RHM output failed");
+    options.fps = 60;
     options.input = video_path;
     options.span = 2;
     options.format = mp42rhm::Format::Rhm;
@@ -419,6 +456,115 @@ int main(int argc, char** argv) {
           require(!read_sspm_v2(automatic.output).map.notes.empty(), "Two-color map is empty");
         }
       }
+    }
+
+    const auto brush_raw = directory / L"brush.rgb";
+    const auto brush_video = directory / L"brush.mp4";
+    const auto brush_palette = directory / L"brush-palette.txt";
+    std::ofstream brush_colors(brush_palette);
+    std::vector<uint8_t> brush_pixels;
+    const uint32_t brush_rgb[] = {0, 0xff0000, 0xffffff, 0x00ff00, 0x0000ff};
+
+    brush_colors << "#ff0000\n#ffffff\n#00ff00\n";
+    for (uint32_t color = 1; color <= 251; ++color)
+      brush_colors << '#' << std::hex << std::setw(6) << std::setfill('0') << color << '\n';
+    brush_colors << "#0000ff\n";
+    brush_colors.close();
+    for (size_t frame = 0; frame < 4; ++frame)
+      for (size_t y = 0; y < 9; ++y)
+        for (size_t x = 0; x < 13; ++x) {
+          const size_t source_frame = frame < 2 ? 0 : frame - 1;
+          const auto color = brush_rgb[source_frame == 2 ? 0 : (x / 2 + y / 3 * 4 + x * y / (source_frame + 1)) % 5];
+
+          brush_pixels.push_back(static_cast<uint8_t>(color >> 16));
+          brush_pixels.push_back(static_cast<uint8_t>(color >> 8));
+          brush_pixels.push_back(static_cast<uint8_t>(color));
+        }
+    std::ofstream(brush_raw, std::ios::binary).write(reinterpret_cast<const char*>(brush_pixels.data()),
+      static_cast<std::streamsize>(brush_pixels.size()));
+    mp42rhm::Process brush_fixture({L"ffmpeg.exe", L"-hide_banner", L"-loglevel", L"error", L"-nostdin",
+      L"-f", L"rawvideo", L"-pixel_format", L"rgb24", L"-video_size", L"13x9", L"-framerate", L"60",
+      L"-i", brush_raw.wstring(), L"-c:v", L"libx264rgb", L"-crf", L"0", L"-preset", L"ultrafast", brush_video.wstring()});
+
+    brush_fixture.finish();
+    for (unsigned variant = 0; variant < 6; ++variant) {
+      const auto format = variant % 2 ? mp42rhm::Format::Rhm : mp42rhm::Format::Sspm;
+      const uint32_t brush = std::array<uint32_t, 3>{3, 8, 64}[variant / 2];
+      const int margin = brush * 2, canvas_width = 13 + margin * 2, canvas_height = 9 + margin * 2;
+      const size_t canvas_size = size_t(canvas_width) * canvas_height;
+      auto brush_options = compensated_options;
+      const auto name = "brush-" + std::to_string(variant);
+
+      brush_options.format = format;
+      brush_options.input = brush_video;
+      brush_options.palette_cycle = brush_palette;
+      brush_options.width = 13;
+      brush_options.height = 9;
+      brush_options.span = 3.25;
+      brush_options.brush_size = brush;
+      brush_options.output = directory / (name + (format == mp42rhm::Format::Sspm ? ".sspm" : ".rhm"));
+      brush_options.colorset = directory / (name + ".txt");
+      const auto stats = mp42rhm::convert(brush_options);
+      const auto generated = format == mp42rhm::Format::Sspm ? read_sspm_v2(brush_options.output) : read_map(brush_options.output);
+      std::ifstream colors(brush_options.colorset);
+      std::vector<uint32_t> rgb;
+      std::string line;
+      std::vector<uint64_t> order(generated.map.notes.size());
+      std::vector<uint32_t> canvas(canvas_size * 4);
+      bool reflected = false;
+
+      while (std::getline(colors, line))
+        rgb.push_back(mp42rhm::parse_color(line));
+      colors.close();
+      require(rgb.size() == stats.notes && stats.notes == order.size(), "Brush colors must match note count");
+      require(stats.frames == 4 && stats.duration_ms == 67 && stats.filler_notes == 0, "Brush frame counts");
+      require(std::count_if(generated.map.notes.begin(), generated.map.notes.end(),
+        [](const auto& note) { return note.time == 67; }) == 1, "Background frame must retain one timestamp");
+      if (brush == 3)
+        require(stats.notes < 288, "Brush compaction did not reduce the scan-only fixture");
+      for (size_t i = 0; i < order.size(); ++i)
+        order[i] = (uint64_t(generated.map.notes[i].time) << 32) | i;
+      mp42rhm::sort_note_indices(order);
+      for (size_t rank = order.size(); rank-- > 0;) {
+        const auto& note = generated.map.notes[static_cast<uint32_t>(order[rank])];
+        const size_t frame = (note.time * 60 + 500) / 1000 - 1;
+        const int x = static_cast<int>(std::lround((note.x - 1) * 4 + 6.5 - brush / 2.0)) + margin;
+        const int y = static_cast<int>(std::lround((note.y - 1) * 4 + 4.5 - brush / 2.0)) + margin;
+
+        reflected |= x < margin || y < margin;
+        require(frame < 4 && x >= 0 && y >= 0 && x + brush <= canvas_width && y + brush <= canvas_height, "Brush position outside canvas");
+        require(note.time == mp42rhm::frame_time(frame + 1, 60), "Brush colors are staggered");
+        for (int row = y; row < y + static_cast<int>(brush); ++row)
+          for (int column = x; column < x + static_cast<int>(brush); ++column)
+            canvas[frame * canvas_size + row * canvas_width + column] = rgb[rank];
+      }
+      require(reflected, "Brush fixture did not exercise reflected edge masks");
+      for (size_t frame = 0; frame < 4; ++frame)
+        for (size_t y = 0; y < size_t(canvas_height); ++y)
+          for (size_t x = 0; x < size_t(canvas_width); ++x) {
+            uint32_t expected = 0;
+
+            if (x >= size_t(margin) && x < size_t(margin + 13) && y >= size_t(margin) && y < size_t(margin + 9)) {
+              const size_t pixel = (frame * 117 + (y - margin) * 13 + x - margin) * 3;
+
+              expected = uint32_t(brush_pixels[pixel]) << 16 |
+                uint32_t(brush_pixels[pixel + 1]) << 8 | brush_pixels[pixel + 2];
+            }
+            require(canvas[frame * canvas_size + y * canvas_width + x] == expected, "Brush repaint changed pixels or left edge spill");
+          }
+      brush_options.output = directory / (name + "-budget" + (format == mp42rhm::Format::Sspm ? ".sspm" : ".rhm"));
+      brush_options.colorset = directory / (name + "-budget.txt");
+      brush_options.max_notes = stats.notes - 1;
+      must_fail([&] { mp42rhm::convert(brush_options); });
+      require(!fs::exists(brush_options.output) && !fs::exists(brush_options.colorset), "Published partial brush export");
+      brush_options.brush_size = 0;
+      must_fail([&] { mp42rhm::validate(brush_options); });
+      brush_options.brush_size = 65;
+      must_fail([&] { mp42rhm::validate(brush_options); });
+      brush_options.brush_size = brush;
+      brush_options.mode = mp42rhm::ColorMode::Bw;
+      brush_options.palette_cycle.clear();
+      must_fail([&] { mp42rhm::validate(brush_options); });
     }
 
     auto invalid_compensation = compensated_options;

@@ -1,11 +1,11 @@
 #include "note_order.h"
 #include "converter.h"
 
-#include <algorithm>
 #include <cstring>
 #include <fstream>
 #include <numeric>
 #include <stdexcept>
+#include <utility>
 
 namespace mp42rhm {
   // .NET 9 ArraySortHelper adaptation; see licenses/dotnet-runtime.txt

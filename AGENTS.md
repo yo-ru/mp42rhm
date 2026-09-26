@@ -6,7 +6,7 @@ Use the CLI to export video maps for unmodified Steam Rhythia. Export requests d
 
 - Use `build/Release/mp42rhm.exe`. If missing, follow the build commands in README.md.
 - FFmpeg and ffprobe must be on PATH, or supplied through `--ffmpeg` and `--ffprobe`.
-- Check `--help` for the current options.
+- Use `--help` for common options and `--help-all` for the complete CLI.
 
 ## Workflow
 
@@ -27,14 +27,15 @@ Omit `--seconds` for the full video. Use `--start` to select a clip, `--title` f
 - Default format: SSPM v2. Use `--format rhm` when requested.
 - `--mode bw`: thresholded black and white.
 - `--mode grayscale`: 4 levels by default.
-- `--mode color`: automatic compact palette, up to 32 colors by default.
+- `--mode color`: automatic compact palette, up to 64 colors by default.
 - `--colors 2..256`: grayscale/color palette size, including the background.
 - `--palette-cycle PATH`: reuse a custom palette and its repeated color entries. Exclude the background; do not combine with `--colors`.
 - `--background HEX`: color-mode background. Black and white/grayscale require black.
+- Color/grayscale defaults to `--brush-size 8`: overlapping squares, one colorset line per note. Requires Note Opacity 100% and Fade Length 0. Use `--brush-size 1` for pixel mode; palette repetitions only apply there.
 
 Colorsets and Steam color ordering are automatic. Default pixel spacing is 0.01; `--span` overrides image width in grid units.
 
-Set `--max-notes` for larger exports; the default is five million. Both total notes and peak notes per frame affect Steam playback. Do not assume a universal safe limit or claim an export was tested in-game without testing it.
+Defaults are 160x90 at 12 fps, with a 100-million-note budget. Set `--max-notes` to change the budget. Both total notes and peak notes per frame affect Steam playback. Do not assume a universal safe limit or claim an export was tested in-game without testing it.
 
 ## Handoff
 

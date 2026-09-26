@@ -4,6 +4,7 @@
 #include "note_order.h"
 #include <rhmParse/rhmParse.h>
 #include <bcrypt.h>
+#include <intrin.h>
 
 #include <algorithm>
 #include <array>
@@ -12,10 +13,13 @@
 #include <chrono>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <locale>
 #include <stdexcept>
+#include <thread>
+#include <unordered_map>
 #include <vector>
 
 namespace mp42rhm {
@@ -87,6 +91,10 @@ namespace mp42rhm {
       throw std::runtime_error("Sampling size must be between 2x2 and 1920x1080");
     if (options.fps < 1 || options.fps > 60)
       throw std::runtime_error("FPS must be between 1 and 60");
+    if (options.brush_size < 1 || options.brush_size > 64)
+      throw std::runtime_error("Brush size must be between 1 and 64");
+    if (options.brush_size > 1 && options.mode == ColorMode::Bw)
+      throw std::runtime_error("--brush-size requires color or grayscale mode");
     if (options.threshold > 255 || options.max_notes == 0)
       throw std::runtime_error("Threshold must be 0..255 and max-notes must be positive");
     if (options.color_count != 0 && (options.color_count < 2 || options.color_count > 256))
@@ -176,7 +184,7 @@ namespace mp42rhm {
   static PaletteCycle generate_palette(const Options& options, const std::wstring& filter) {
     PaletteCycle palette;
     const uint32_t count = options.color_count ? options.color_count :
-      options.mode == ColorMode::Grayscale ? 4 : 32;
+      options.mode == ColorMode::Grayscale ? 4 : 64;
 
     if (options.mode == ColorMode::Grayscale) {
       for (uint32_t i = 1; i < count; ++i)
@@ -309,6 +317,248 @@ namespace mp42rhm {
     output.close();
   }
 
+  struct BrushStroke {
+    int32_t x, y;
+    uint32_t color;
+  };
+
+  static std::vector<BrushStroke> compact_brush_strokes(const std::vector<BrushStroke>& strokes,
+    const std::vector<uint8_t>& pixels, const Options& options) {
+    const int32_t brush = static_cast<int32_t>(options.brush_size), margin = brush * 2;
+    const int32_t width = options.width + margin * 2, height = options.height + margin * 2;
+    const int32_t words = (width + 63) / 64 + 1;
+    const uint64_t mask = brush == 64 ? UINT64_MAX : (uint64_t(1) << brush) - 1;
+    std::vector<uint32_t> target(size_t(width) * height, options.background);
+    std::vector<uint64_t> covered(size_t(words) * height);
+    std::vector<BrushStroke> result;
+
+    for (uint32_t y = 0; y < options.height; ++y)
+      for (uint32_t x = 0; x < options.width; ++x) {
+        const size_t pixel = (size_t(y) * options.width + x) * 3;
+
+        target[size_t(y + margin) * width + x + margin] = (uint32_t(pixels[pixel]) << 16) |
+          (uint32_t(pixels[pixel + 1]) << 8) | pixels[pixel + 2];
+      }
+    const auto exposed = [&](int32_t x, int32_t y) {
+      const size_t word = size_t(y) * words + x / 64;
+      const unsigned shift = x % 64;
+
+      return ((~covered[word] >> shift) | (shift ? ~covered[word + 1] << (64 - shift) : 0)) & mask;
+    };
+
+    for (auto stroke = strokes.rbegin(); stroke != strokes.rend(); ++stroke) {
+      const int32_t x = stroke->x + margin, y = stroke->y + margin;
+      int32_t left = x + brush, top = y + brush, right = x - 1, bottom = y - 1;
+      int best_count = 0;
+
+      for (int32_t row = y; row < y + brush; ++row) {
+        const uint64_t bits = exposed(x, row);
+        unsigned long low, high;
+
+        if (!bits)
+          continue;
+        _BitScanForward64(&low, bits);
+        _BitScanReverse64(&high, bits);
+        left = std::min(left, x + static_cast<int32_t>(low));
+        right = std::max(right, x + static_cast<int32_t>(high));
+        top = std::min(top, row);
+        bottom = row;
+        best_count += static_cast<int>(__popcnt64(bits));
+      }
+      if (best_count == 0)
+        continue;
+
+      // Keep every exposed pixel of the original stroke
+      const int32_t min_x = std::max(0, right - brush + 1), max_x = std::min(left, width - brush);
+      const int32_t min_y = std::max(0, bottom - brush + 1), max_y = std::min(top, height - brush);
+      int32_t best_x = x, best_y = y;
+
+      for (int32_t cy = min_y; cy <= max_y; ++cy)
+        for (int32_t cx = min_x; cx <= max_x; ++cx) {
+          if (cx == x && cy == y)
+            continue;
+          int count = 0;
+          bool valid = true;
+
+          for (int32_t row = cy; row < cy + brush && valid; ++row) {
+            uint64_t bits = exposed(cx, row);
+
+            count += static_cast<int>(__popcnt64(bits));
+            while (bits) {
+              unsigned long bit;
+
+              _BitScanForward64(&bit, bits);
+              if (target[size_t(row) * width + cx + bit] != stroke->color) {
+                // This pixel also blocks every placement up to its column
+                cx = std::min(max_x, cx + static_cast<int32_t>(bit));
+                valid = false;
+                break;
+              }
+              bits &= bits - 1;
+            }
+          }
+          if (valid && count > best_count) {
+            best_count = count;
+            best_x = cx;
+            best_y = cy;
+          }
+        }
+      for (int32_t row = best_y; row < best_y + brush; ++row) {
+        const size_t word = size_t(row) * words + best_x / 64;
+        const unsigned shift = best_x % 64;
+
+        covered[word] |= mask << shift;
+        if (shift)
+          covered[word + 1] |= mask >> (64 - shift);
+      }
+      result.push_back({best_x - margin, best_y - margin, stroke->color});
+    }
+    std::reverse(result.begin(), result.end());
+    return result;
+  }
+
+  static std::vector<BrushStroke> remove_redundant_strokes(const std::vector<BrushStroke>& strokes,
+    const Options& options) {
+    const int32_t brush = static_cast<int32_t>(options.brush_size), margin = brush * 2;
+    const int32_t width = options.width + margin * 2, height = options.height + margin * 2;
+    std::vector<uint32_t> owner(size_t(width) * height, UINT32_MAX), canvas(owner.size(), options.background);
+    std::vector<BrushStroke> result;
+
+    for (size_t i = 0; i < strokes.size(); ++i) {
+      const auto& stroke = strokes[i];
+
+      for (int32_t y = stroke.y + margin; y < stroke.y + margin + brush; ++y)
+        std::fill_n(owner.begin() + size_t(y) * width + stroke.x + margin, brush, static_cast<uint32_t>(i));
+    }
+    for (size_t i = 0; i < strokes.size(); ++i) {
+      const auto& stroke = strokes[i];
+      bool needed = false;
+
+      for (int32_t y = stroke.y + margin; y < stroke.y + margin + brush && !needed; ++y)
+        for (int32_t x = stroke.x + margin; x < stroke.x + margin + brush; ++x) {
+          const size_t pixel = size_t(y) * width + x;
+
+          if (owner[pixel] == i && canvas[pixel] != stroke.color) {
+            needed = true;
+            break;
+          }
+        }
+      if (!needed)
+        continue;
+      result.push_back(stroke);
+      for (int32_t y = stroke.y + margin; y < stroke.y + margin + brush; ++y)
+        std::fill_n(canvas.begin() + size_t(y) * width + stroke.x + margin, brush, stroke.color);
+    }
+    // Retain a timestamp for background-only frames
+    if (result.empty())
+      result.push_back(strokes.back());
+    return result;
+  }
+
+  static std::vector<BrushStroke> paint_frame(const std::vector<uint8_t>& pixels, const Options& options,
+    const PaletteCycle& palette) {
+    const int32_t brush = static_cast<int32_t>(options.brush_size);
+    auto colors = palette.colors;
+    const auto background = static_cast<uint8_t>(colors.size());
+    std::unordered_map<uint32_t, uint8_t> indices;
+    std::vector<uint8_t> canvas(size_t(options.width) * options.height), target(canvas.size()), indexed(canvas.size());
+    std::vector<BrushStroke> best, strokes;
+    std::vector<std::vector<BrushStroke>> candidates;
+
+    colors.push_back(options.background);
+    for (size_t i = 0; i < colors.size(); ++i)
+      indices.emplace(colors[i], static_cast<uint8_t>(i));
+    for (size_t i = 0; i < indexed.size(); ++i) {
+      const uint32_t color = (uint32_t(pixels[i * 3]) << 16) |
+        (uint32_t(pixels[i * 3 + 1]) << 8) | pixels[i * 3 + 2];
+
+      indexed[i] = indices.at(color);
+    }
+    for (int scan = 0; scan < 16; ++scan) {
+      const int orientation = scan == 0 ? 0 : scan < 9 ? scan - 1 : scan - 8;
+      const int32_t width = (orientation & 4) ? options.height : options.width;
+      const int32_t height = (orientation & 4) ? options.width : options.height;
+
+      std::fill(canvas.begin(), canvas.end(), background);
+      strokes.clear();
+      for (int32_t y = 0; y < height; ++y)
+        for (int32_t x = 0; x < width; ++x) {
+          const int32_t rx = (orientation & 1) ? width - 1 - x : x;
+          const int32_t ry = (orientation & 2) ? height - 1 - y : y;
+          const size_t pixel = (orientation & 4) ? size_t(rx) * options.width + ry : size_t(ry) * options.width + rx;
+
+          target[size_t(y) * width + x] = indexed[pixel];
+        }
+      const auto paint = [&](int32_t x, int32_t y) {
+        const uint8_t color = target[size_t(y) * width + x];
+
+        if (canvas[size_t(y) * width + x] == color)
+          return;
+        strokes.push_back({x, y, colors[color]});
+        for (int32_t row = y; row < std::min(height, y + brush); ++row)
+          std::fill_n(canvas.begin() + size_t(row) * width + x, std::min(brush, width - x), color);
+      };
+
+      if (scan == 0 || scan >= 9) {
+        for (int32_t y = 0; y < height; ++y)
+          for (int32_t x = 0; x < width; ++x)
+            paint(x, y);
+      } else {
+        // Morton order preserves painted pixels above and to the left
+        const auto visit = [&](const auto& self, int32_t x, int32_t y, int32_t size) -> void {
+          if (x >= width || y >= height)
+            return;
+          if (size == 1) {
+            paint(x, y);
+            return;
+          }
+          const int32_t half = size / 2;
+
+          self(self, x, y, half);
+          self(self, x + half, y, half);
+          self(self, x, y + half, half);
+          self(self, x + half, y + half, half);
+        };
+        int32_t size = 1;
+
+        while (size < std::max(width, height))
+          size *= 2;
+        visit(visit, 0, 0, size);
+      }
+      // Erase brush spill before reflecting back to image coordinates
+      for (int32_t y = 0; y < height + brush; y += brush)
+        strokes.push_back({width, y, options.background});
+      for (int32_t x = 0; x < width; x += brush)
+        strokes.push_back({x, height, options.background});
+      for (auto& stroke : strokes) {
+        if (orientation & 1)
+          stroke.x = width - stroke.x - brush;
+        if (orientation & 2)
+          stroke.y = height - stroke.y - brush;
+        if (orientation & 4)
+          std::swap(stroke.x, stroke.y);
+      }
+      candidates.push_back(std::move(strokes));
+    }
+    const size_t workers = std::max(1U, std::min(4U, std::thread::hardware_concurrency()));
+
+    for (size_t begin = 0; begin < candidates.size(); begin += workers) {
+      std::vector<std::future<std::vector<BrushStroke>>> jobs;
+
+      for (size_t i = begin; i < std::min(candidates.size(), begin + workers); ++i)
+        jobs.push_back(std::async(std::launch::async, [&, i] {
+          return remove_redundant_strokes(compact_brush_strokes(candidates[i], pixels, options), options);
+        }));
+      for (auto& job : jobs) {
+        auto candidate = job.get();
+
+        if (best.empty() || candidate.size() < best.size())
+          best = std::move(candidate);
+      }
+    }
+    return best;
+  }
+
   Statistics convert(const Options& options) {
     validate(options);
 
@@ -316,6 +566,7 @@ namespace mp42rhm {
     const auto archive_path = temporary.path / options.output.filename();
     const bool sspm = options.format == Format::Sspm;
     const bool cycle_mode = options.mode != ColorMode::Bw;
+    const bool brush_mode = options.brush_size > 1;
     const bool binary = sspm || cycle_mode;
     const auto song_name = options.title.empty() ? options.input.stem().u8string() : options.title;
     const auto title = options.title.empty() ? song_name + " [video]" : options.title;
@@ -364,7 +615,7 @@ namespace mp42rhm {
     if (!options.colorset.empty()) {
       colors.open(temporary.path / L"colors.txt", std::ios::binary);
       colors.exceptions(std::ios::failbit | std::ios::badbit);
-      if (cycle_mode)
+      if (cycle_mode && !brush_mode)
         for (size_t slot : palette.slots)
           colors << color_hex(palette.colors[slot]) << '\n';
       if (!cycle_mode)
@@ -401,6 +652,8 @@ namespace mp42rhm {
 
     Process decoder(arguments);
     std::vector<uint8_t> pixels(size_t(options.width) * options.height * (cycle_mode ? 3 : 1));
+    std::vector<uint8_t> previous_pixels;
+    std::vector<BrushStroke> previous_strokes;
     std::vector<std::string> x_coordinates(options.width);
     std::vector<std::string> positions(size_t(options.width) * options.height);
     const double pitch = options.span == 0 ? 0.01 : options.span / options.width;
@@ -472,7 +725,7 @@ namespace mp42rhm {
       auto prefix = binary ? std::string(reinterpret_cast<const char*>(&time), sizeof(time)) :
         ",{\"Time\":" + std::to_string(time);
       uint64_t frame_notes = 0;
-      const auto emit = [&](size_t pixel) {
+      const auto emit = [&](const std::string& position, bool filler = false) {
         if (statistics.notes == options.max_notes)
           throw std::runtime_error("Note limit reached; reduce resolution/duration or raise --max-notes");
         if (sspm && statistics.notes == UINT32_MAX)
@@ -480,16 +733,35 @@ namespace mp42rhm {
         if (cycle_mode && statistics.notes == INT32_MAX)
           throw std::runtime_error("Steam color compensation exceeds the signed array-index range");
         frame_json.append(prefix, !binary && statistics.notes == 0 ? 1 : 0);
-        frame_json.append(positions[pixel]);
+        frame_json.append(position);
         ++statistics.notes;
         ++frame_notes;
-        if (pixel == filler_pixel)
+        if (filler)
           ++statistics.filler_notes;
         last_note = static_cast<uint32_t>(time);
       };
 
       frame_json.clear();
-      if (cycle_mode) {
+      if (brush_mode) {
+        if (pixels != previous_pixels) {
+          previous_strokes = paint_frame(pixels, options, palette);
+          previous_pixels = pixels;
+        }
+
+        // Steam draws simultaneous notes in reverse index order
+        for (auto stroke = previous_strokes.rbegin(); stroke != previous_strokes.rend(); ++stroke) {
+          const float x = static_cast<float>(1 + (stroke->x + options.brush_size / 2.0 - options.width / 2.0) * pitch);
+          const float y = static_cast<float>(1 + (stroke->y + options.brush_size / 2.0 - options.height / 2.0) * pitch);
+          std::string position;
+
+          position.push_back(0);
+          position.push_back(1);
+          position.append(reinterpret_cast<const char*>(&x), sizeof(x));
+          position.append(reinterpret_cast<const char*>(&y), sizeof(y));
+          emit(position);
+          colors << color_hex(stroke->color) << '\n';
+        }
+      } else if (cycle_mode) {
         for (auto& bucket : buckets)
           bucket.clear();
         for (size_t pixel = 0; pixel < size_t(options.width) * options.height; ++pixel) {
@@ -511,8 +783,11 @@ namespace mp42rhm {
         for (size_t color = 0; color < buckets.size(); ++color)
           cycles = std::max(cycles, (buckets[color].size() + palette.quotas[color] - 1) / palette.quotas[color]);
         for (size_t cycle = 0; cycle < cycles; ++cycle)
-          for (size_t color : palette.slots)
-            emit(consumed[color] < buckets[color].size() ? buckets[color][consumed[color]++] : filler_pixel);
+          for (size_t color : palette.slots) {
+            const auto pixel = consumed[color] < buckets[color].size() ? buckets[color][consumed[color]++] : filler_pixel;
+
+            emit(positions[pixel], pixel == filler_pixel);
+          }
       } else {
         for (uint32_t y = 0; y < options.height; ++y) {
           for (uint32_t x = 0; x < options.width; ++x) {
@@ -520,7 +795,7 @@ namespace mp42rhm {
 
             if (pixels[pixel] < options.threshold)
               continue;
-            emit(pixel);
+            emit(positions[pixel]);
           }
         }
       }
