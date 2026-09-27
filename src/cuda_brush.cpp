@@ -26,7 +26,7 @@ namespace mp42rhm {
       bool busy = false;
       void* stream = nullptr;
       Device owner = 0, canvas = 0, kept = 0;
-      Device input = 0, output = 0, offsets = 0, counts = 0, target = 0, coverage = 0;
+      Device input = 0, fallback = 0, offsets = 0, counts = 0, target = 0, coverage = 0;
     };
     std::vector<Slot> slots;
     size_t capacity, target_bytes, coverage_bytes;
@@ -126,7 +126,7 @@ namespace mp42rhm {
         for (auto& slot : slots) {
           if (slot.stream)
             discard(dll, "cuStreamSynchronize", slot.stream);
-          for (const Device buffer : {slot.input, slot.output, slot.offsets, slot.counts,
+          for (const Device buffer : {slot.input, slot.fallback, slot.offsets, slot.counts,
             slot.target, slot.coverage, slot.owner, slot.canvas, slot.kept})
             if (buffer)
               discard(dll, "cuMemFree_v2", buffer);
@@ -160,7 +160,7 @@ namespace mp42rhm {
       size_t free_bytes = 0, total_bytes = 0;
 
       call("cuMemGetInfo_v2", &free_bytes, &total_bytes);
-      const size_t slot_bytes = capacity * sizeof(BrushStroke) * 2 + target_bytes * 33 + coverage_bytes + 192;
+      const size_t slot_bytes = capacity * sizeof(BrushStroke) + target_bytes * 33 + coverage_bytes + 384;
       // Leave VRAM for the desktop and other applications
       const size_t frames = std::min(size_t(32), (free_bytes - free_bytes / 4) / slot_bytes);
 
@@ -174,7 +174,7 @@ namespace mp42rhm {
       for (auto& slot : slots) {
         call("cuStreamCreate", &slot.stream, 1U);
         call("cuMemAlloc_v2", &slot.input, capacity * sizeof(BrushStroke));
-        call("cuMemAlloc_v2", &slot.output, capacity * sizeof(BrushStroke));
+        call("cuMemAlloc_v2", &slot.fallback, size_t(16 * sizeof(BrushStroke)));
         call("cuMemAlloc_v2", &slot.offsets, size_t(64));
         call("cuMemAlloc_v2", &slot.counts, size_t(64));
         call("cuMemAlloc_v2", &slot.target, target_bytes);
@@ -241,17 +241,17 @@ namespace mp42rhm {
         call("cuMemsetD8Async", slot->owner, static_cast<unsigned char>(0), target_bytes * 16, slot->stream);
         call("cuMemsetD32Async", slot->canvas, options.background, target_bytes * 4, slot->stream);
         call("cuMemsetD8Async", slot->kept, static_cast<unsigned char>(0), size_t(64), slot->stream);
-        void* args[] = {&slot->input, &slot->output, &slot->offsets, &slot->counts, &slot->target,
-          &slot->coverage, &width, &height, &brush, &first, &steps, &groups, &slot->owner};
+        void* args[] = {&slot->input, &slot->input, &slot->offsets, &slot->counts, &slot->target,
+          &slot->coverage, &width, &height, &brush, &first, &steps, &groups, &slot->owner, &slot->fallback};
         const int maximum = *std::max_element(counts.begin(), counts.end());
 
         for (; first < maximum; first += steps)
           call("cuLaunchKernel", kernel, 16U, 1U, 1U, 128U, 1U, 1U, 0U, slot->stream, args, static_cast<void**>(nullptr));
-        void* cleanup_args[] = {&slot->output, &slot->input, &slot->offsets, &slot->counts,
+        void* cleanup_args[] = {&slot->input, &slot->input, &slot->offsets, &slot->counts,
           &slot->owner, &slot->canvas, &slot->kept, &width, &height, &brush, &first, &steps};
         for (first = 0; first < maximum; first += steps)
           call("cuLaunchKernel", cleanup_kernel, 16U, 1U, 1U, 128U, 1U, 1U, 0U, slot->stream, cleanup_args, static_cast<void**>(nullptr));
-        void* blank_args[] = {&slot->output, &slot->input, &slot->offsets, &slot->counts, &slot->kept};
+        void* blank_args[] = {&slot->fallback, &slot->input, &slot->offsets, &slot->counts, &slot->kept};
         call("cuLaunchKernel", blank_kernel, 16U, 1U, 1U, 1U, 1U, 1U, 0U, slot->stream, blank_args, static_cast<void**>(nullptr));
 
         call("cuMemcpyDtoHAsync_v2", kept.data(), slot->kept, sizeof(kept), slot->stream);

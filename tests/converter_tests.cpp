@@ -221,11 +221,11 @@ static void test_cuda_brush_sizes(const fs::path& directory) {
   std::vector<uint8_t> pixels;
 
   std::ofstream(palette) << "#ff0000\n#00ff00\n#0000ff\n#ffffff\n";
-  for (int frame = 0; frame < 2; ++frame)
+  for (int frame = 0; frame < 36; ++frame)
     for (int y = 0; y < 97; ++y)
       for (int x = 0; x < 133; ++x) {
         const bool detail = (x * 7 + y * 11) % 137 < 3;
-        const auto color = colors[detail ? (x + y + frame) % 5 : (x / 39 + y / 29 + frame) % 5];
+        const auto color = colors[frame % 3 == 2 ? 0 : detail ? (x + y + frame) % 5 : (x / 39 + y / 29 + frame) % 5];
 
         pixels.push_back(static_cast<uint8_t>(color >> 16));
         pixels.push_back(static_cast<uint8_t>(color >> 8));
@@ -240,6 +240,7 @@ static void test_cuda_brush_sizes(const fs::path& directory) {
   for (const uint32_t brush : {2, 3, 8, 16, 31, 32, 33, 63, 64}) {
     mp42rhm::Options options;
     const auto name = "cuda-wide-" + std::to_string(brush);
+    const int frames = brush == 32 ? 36 : 3;
 
     options.input = video;
     options.output = directory / (name + "-cpu.sspm");
@@ -250,6 +251,7 @@ static void test_cuda_brush_sizes(const fs::path& directory) {
     options.width = 133;
     options.height = 97;
     options.fps = 24;
+    options.seconds = frames / 24.0;
     options.brush_size = brush;
     options.audio = false;
     const auto cpu_stats = mp42rhm::convert(options);
@@ -266,12 +268,13 @@ static void test_cuda_brush_sizes(const fs::path& directory) {
 
     require(cpu_stats.notes == gpu_stats.notes && cpu_stats.peak_frame_notes == gpu_stats.peak_frame_notes,
       "Wide CUDA brush note counts differ from CPU");
+    require(cpu_stats.frames == frames && gpu_stats.frames == frames, "Wide CUDA brush frame counts");
     check_sspm(options.output, cpu_map);
     require(cpu_colors == gpu_colors, "Wide CUDA brush colors differ from CPU");
-    const auto actual = render_brush_map(options, 2);
+    const auto actual = render_brush_map(options, frames);
     const int margin = brush * 2, width = 133 + margin * 2, height = 97 + margin * 2;
 
-    for (int frame = 0; frame < 2; ++frame)
+    for (int frame = 0; frame < frames; ++frame)
       for (int y = 0; y < height; ++y)
         for (int x = 0; x < width; ++x) {
           uint32_t expected = options.background;
@@ -343,31 +346,34 @@ static void test_new_modes(const fs::path& directory, const fs::path& executable
         }
         require(actual[(f * height + y) * width + x] == expected, "Adaptive palette changed an already-small palette");
       }
-  options.color_count = 32;
-  options.output = directory / L"adaptive-quantized.sspm";
-  options.colorset = directory / L"adaptive-quantized.txt";
-  options.experimental_cuda = cuda;
-  mp42rhm::convert(options);
-  const auto quantized = render_brush_map(options, 3);
-  mp42rhm::Process reference_decoder({L"ffmpeg.exe", L"-v", L"error", L"-i", video.wstring(),
-    L"-vf", L"setpts=PTS-STARTPTS,fps=24000/1001:start_time=0,format=rgb24,elbg=codebook_length=31:nb_steps=1:seed=1",
-    L"-pix_fmt", L"rgb24", L"-f", L"rawvideo", L"pipe:1"});
-  const auto reference_pixels = reference_decoder.finish();
+  for (uint32_t count : {0, 2, 32, 256, 257}) {
+    options.color_count = count;
+    options.output = directory / (L"adaptive-quantized-" + std::to_wstring(count) + L".sspm");
+    options.colorset = directory / (L"adaptive-quantized-" + std::to_wstring(count) + L".txt");
+    options.experimental_cuda = cuda;
+    mp42rhm::convert(options);
+    const auto quantized = render_brush_map(options, 3);
+    mp42rhm::Process reference_decoder({L"ffmpeg.exe", L"-v", L"error", L"-i", video.wstring(),
+      L"-vf", L"setpts=PTS-STARTPTS,fps=24000/1001:start_time=0,format=rgb24,elbg=codebook_length=" +
+        std::to_wstring((count ? count : 64) - 1) + L":nb_steps=1:seed=1",
+      L"-pix_fmt", L"rgb24", L"-f", L"rawvideo", L"pipe:1"});
+    const auto reference_pixels = reference_decoder.finish();
 
-  require(reference_pixels.size() == pixels.size(), "Adaptive reference frame count");
-  for (size_t f = 0; f < 3; ++f)
-    for (size_t y = 0; y < height; ++y)
-      for (size_t x = 0; x < width; ++x) {
-        uint32_t expected = 0;
+    require(reference_pixels.size() == pixels.size(), "Adaptive reference frame count");
+    for (size_t f = 0; f < 3; ++f)
+      for (size_t y = 0; y < height; ++y)
+        for (size_t x = 0; x < width; ++x) {
+          uint32_t expected = 0;
 
-        if (x >= margin && x < 32 + margin && y >= margin && y < 16 + margin) {
-          const size_t p = (f * 512 + (y - margin) * 32 + x - margin) * 3;
+          if (x >= margin && x < 32 + margin && y >= margin && y < 16 + margin) {
+            const size_t p = (f * 512 + (y - margin) * 32 + x - margin) * 3;
 
-          expected = uint32_t(static_cast<uint8_t>(reference_pixels[p])) << 16 |
-            uint32_t(static_cast<uint8_t>(reference_pixels[p + 1])) << 8 | static_cast<uint8_t>(reference_pixels[p + 2]);
+            expected = uint32_t(static_cast<uint8_t>(reference_pixels[p])) << 16 |
+              uint32_t(static_cast<uint8_t>(reference_pixels[p + 1])) << 8 | static_cast<uint8_t>(reference_pixels[p + 2]);
+          }
+          require(quantized[(f * height + y) * width + x] == expected, "Adaptive export changed quantized pixels");
         }
-        require(quantized[(f * height + y) * width + x] == expected, "Adaptive export changed quantized pixels");
-      }
+  }
   for (auto mode : {mp42rhm::ColorMode::Bw, mp42rhm::ColorMode::Grayscale}) {
     options.mode = mode;
     options.adaptive_palette = false;

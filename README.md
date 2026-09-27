@@ -39,7 +39,7 @@ Resolution supports up to 3840x2160. `--fps` accepts decimals, fractions such as
 .\build\Release\mp42rhm.exe episode.mkv episode --mode grayscale --compact-colorset --width 640 --height 480 --subtitles 1
 ```
 
-`--experimental-cuda` enables NVIDIA acceleration for color/grayscale and compact BW. Brush sizes 2..64 are supported, defaulting to 32. Requires an NVIDIA driver and CUDA 12/13 NVRTC with its matching builtins DLL beside the executable or on PATH. Frame batching adjusts to available VRAM; CPU encoding remains the default.
+`--experimental-cuda` enables NVIDIA acceleration for color/grayscale and compact BW. Brush sizes 2..64 are supported, defaulting to 32. Requires an NVIDIA driver and CUDA 12/13 NVRTC with its matching builtins DLL beside the executable or on PATH. Stroke buffers are reused in place; frame batching adjusts to available VRAM. CPU encoding remains the default.
 
 ## Encoding
 
@@ -49,6 +49,8 @@ Resolution supports up to 3840x2160. `--fps` accepts decimals, fractions such as
 4. Note order is compensated for Steam's sorting and reverse draw order. Notes and MP3 audio are packaged as SSPM v2 or RHM.
 
 Brush colorsets normally contain one line per note. Compact mode repeats a short sequence and schedules strokes around it without changing pixels. `--colors` controls palette size, not colorset length.
+
+Raster scans track only the active brush edge, and stroke analysis uses SIMD. Adaptive palettes up to 256 colors use indexed FFmpeg frames to reduce pipe traffic. These optimizations are automatic and preserve the generated notes and colors.
 
 ## Playback
 

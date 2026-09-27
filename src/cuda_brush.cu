@@ -19,7 +19,7 @@ __device__ U64 exposed(const U64* covered, int words, int x, int y, U64 mask) {
 
 extern "C" __global__ void compact(const Stroke* input, Stroke* output, const unsigned* offsets,
   const unsigned* counts, const unsigned* target, U64* coverage, int width, int height,
-  int brush, int first, int steps, int groups_per_frame, unsigned* owner) {
+  int brush, int first, int steps, int groups_per_frame, unsigned* owner, Stroke* fallback) {
   const int tid = threadIdx.x, group = blockIdx.x;
   const int words = (width + 63) / 64 + 1;
   const int margin = brush * 2;
@@ -213,8 +213,12 @@ extern "C" __global__ void compact(const Stroke* input, Stroke* output, const un
       if (shift)
         covered[word + 1] |= mask >> (64 - shift);
     }
-    if (tid == 0)
+    if (tid == 0) {
       output[offsets[group] + index] = {chosen_x - margin, chosen_y - margin, stroke.color};
+      // Preserve the highest surviving stroke for blank frames
+      if (!first && !step)
+        fallback[group] = output[offsets[group] + index];
+    }
     __syncthreads();
   }
 }
@@ -257,16 +261,14 @@ extern "C" __global__ void cleanup(const Stroke* input, Stroke* output,
   }
 }
 
-extern "C" __global__ void retain_blank(const Stroke* input, Stroke* output,
+extern "C" __global__ void retain_blank(const Stroke* fallback, Stroke* output,
   const unsigned* offsets, const unsigned* counts, unsigned* kept) {
   const int group = blockIdx.x;
 
   if (threadIdx.x || kept[group])
     return;
-  for (int i = int(counts[group]) - 1; i >= 0; --i)
-    if (input[offsets[group] + i].x != CULLED) {
-      output[offsets[group] + i] = input[offsets[group] + i];
-      kept[group] = 1;
-      return;
-    }
+  if (counts[group]) {
+    output[offsets[group]] = fallback[group];
+    kept[group] = 1;
+  }
 }

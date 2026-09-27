@@ -1,6 +1,7 @@
 #include "brush_optimizer.h"
 #include <algorithm>
 #include <array>
+#include <emmintrin.h>
 #include <intrin.h>
 #include <queue>
 #include <stdexcept>
@@ -61,8 +62,18 @@ namespace mp42rhm {
       for (int y = 0; y < brush; ++y) {
         uint64_t bits = 0;
 
-        for (int x = 0; x < brush; ++x)
-          if (target[size_t(s.y + y + margin) * width + s.x + x + margin] != s.color)
+        const uint32_t* row = target.data() + size_t(s.y + y + margin) * width + s.x + margin;
+        const auto wanted = _mm_set1_epi32(static_cast<int>(s.color));
+        int x = 0;
+
+        for (; x + 4 <= brush; x += 4) {
+          const auto equal = _mm_cmpeq_epi32(_mm_loadu_si128(reinterpret_cast<const __m128i*>(row + x)), wanted);
+          const unsigned match = _mm_movemask_ps(_mm_castsi128_ps(equal));
+
+          bits |= uint64_t(~match & 15) << x;
+        }
+        for (; x < brush; ++x)
+          if (row[x] != s.color)
             bits |= uint64_t(1) << x;
         masks[size_t(i) * brush + y] = bits;
         bad[i] += static_cast<uint16_t>(__popcnt64(bits));

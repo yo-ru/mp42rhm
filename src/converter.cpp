@@ -525,7 +525,12 @@ namespace mp42rhm {
       const int32_t width = (orientation & 4) ? options.height : options.width;
       const int32_t height = (orientation & 4) ? options.width : options.height;
 
-      std::fill(canvas.begin(), canvas.end(), background);
+      const bool raster = scan == 0 || scan >= 9;
+      std::vector<uint16_t> frontier(raster ? width : 0);
+      std::vector<int32_t> expires(raster ? width : 0);
+
+      if (!raster)
+        std::fill(canvas.begin(), canvas.end(), background);
       strokes.clear();
       for (int32_t y = 0; y < height; ++y)
         for (int32_t x = 0; x < width; ++x) {
@@ -538,11 +543,20 @@ namespace mp42rhm {
       const auto paint = [&](int32_t x, int32_t y) {
         const uint16_t color = target[size_t(y) * width + x];
 
-        if (canvas[size_t(y) * width + x] == color)
-          return;
-        strokes.push_back({x, y, colors[color]});
-        for (int32_t row = y; row < std::min(height, y + brush); ++row)
-          std::fill_n(canvas.begin() + size_t(row) * width + x, std::min(brush, width - x), color);
+        if (raster) {
+          if ((expires[x] > y ? frontier[x] : background) == color)
+            return;
+          strokes.push_back({x, y, colors[color]});
+          // Later raster strokes expire no earlier than the strokes they cover
+          std::fill_n(frontier.begin() + x, std::min(brush, width - x), color);
+          std::fill_n(expires.begin() + x, std::min(brush, width - x), y + brush);
+        } else {
+          if (canvas[size_t(y) * width + x] == color)
+            return;
+          strokes.push_back({x, y, colors[color]});
+          for (int32_t row = y; row < std::min(height, y + brush); ++row)
+            std::fill_n(canvas.begin() + size_t(row) * width + x, std::min(brush, width - x), color);
+        }
       };
 
       if (scan == 0 || scan >= 9) {
@@ -627,6 +641,7 @@ namespace mp42rhm {
     const bool sspm = options.format == Format::Sspm;
     const bool brush_mode = options.brush_size > 1;
     const bool cycle_mode = options.mode != ColorMode::Bw || brush_mode;
+    const bool indexed_decode = options.adaptive_palette && options.color_count <= 256;
     const bool binary = sspm || cycle_mode;
     const auto song_name = options.title.empty() ? options.input.stem().u8string() : options.title;
     const auto title = options.title.empty() ? song_name + " [video]" : options.title;
@@ -714,16 +729,19 @@ namespace mp42rhm {
       const auto count = options.color_count ? options.color_count : 64;
 
       filter += L",format=rgb24,elbg=codebook_length=" + std::to_wstring(count - 1) + L":nb_steps=1:seed=1";
+      if (indexed_decode)
+        filter += L":pal8=1";
       arguments.insert(arguments.end(), {L"-map", L"0:v:0", L"-vf", filter});
     } else if (cycle_mode)
       arguments.insert(arguments.end(), {L"-filter_complex", L"[0:v]" + filter + L"[video];[video][1:v]paletteuse=dither=none[out]", L"-map", L"[out]"});
     else
       arguments.insert(arguments.end(), {L"-map", L"0:v:0", L"-vf", filter});
     arguments.insert(arguments.end(), {L"-an", L"-sn",
-      L"-pix_fmt", cycle_mode ? L"rgb24" : L"gray", L"-f", L"rawvideo", L"pipe:1"});
+      L"-pix_fmt", indexed_decode ? L"pal8" : cycle_mode ? L"rgb24" : L"gray", L"-f", L"rawvideo", L"pipe:1"});
 
     Process decoder(arguments);
     std::vector<uint8_t> pixels(size_t(options.width) * options.height * (cycle_mode ? 3 : 1));
+    std::vector<uint8_t> indexed_frame(indexed_decode ? size_t(options.width) * options.height + 1024 : 0);
     std::vector<uint8_t> previous_pixels;
     std::vector<BrushStroke> previous_strokes;
     std::vector<std::string> x_coordinates(options.width);
@@ -781,17 +799,30 @@ namespace mp42rhm {
     std::shared_future<std::vector<BrushStroke>> last_job;
     bool decode_finished = false;
     const auto read_frame = [&] {
+      auto& frame = indexed_decode ? indexed_frame : pixels;
       size_t received = 0;
 
-      while (received < pixels.size()) {
-        const size_t count = decoder.read(pixels.data() + received, pixels.size() - received);
+      while (received < frame.size()) {
+        const size_t count = decoder.read(frame.data() + received, frame.size() - received);
 
         if (count == 0)
           break;
         received += count;
       }
-      if (received && received != pixels.size())
+      if (received && received != frame.size())
         throw std::runtime_error("FFmpeg returned a truncated video frame");
+      if (received && indexed_decode) {
+        const size_t count = size_t(options.width) * options.height;
+
+        // Raw PAL8 carries 256 native-endian ARGB entries after the indices
+        for (size_t i = 0; i < count; ++i) {
+          const size_t color = count + size_t(frame[i]) * 4;
+
+          pixels[i * 3] = frame[color + 2];
+          pixels[i * 3 + 1] = frame[color + 1];
+          pixels[i * 3 + 2] = frame[color];
+        }
+      }
       return received != 0;
     };
 
