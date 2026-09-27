@@ -147,9 +147,10 @@ namespace mp42rhm {
       dll = LoadLibraryW(L"nvcuda.dll");
       if (!dll)
         throw std::runtime_error("Experimental CUDA requires an NVIDIA GPU and driver");
-      const size_t width = options.width + 128, height = options.height + 128;
+      const size_t padding = options.brush_size * 4;
+      const size_t width = options.width + padding, height = options.height + padding;
 
-      capacity = 16 * (size_t(options.width) * options.height + options.width + options.height + 128);
+      capacity = 16 * (size_t(options.width) * options.height + options.width + options.height + padding);
       target_bytes = width * height * 4;
       coverage_bytes = 16 * ((width + 63) / 64 + 1) * height * 8;
       call("cuInit", 0U);
@@ -186,8 +187,9 @@ namespace mp42rhm {
 
     void compact(std::vector<std::vector<BrushStroke>>& candidates,
       const std::vector<uint8_t>& pixels) {
-      int width = options.width + 128, height = options.height + 128;
-      int brush = 32, first = 0, steps = 512, groups = 16;
+      int brush = options.brush_size, first = 0, steps = 512, groups = 16;
+      const int margin = brush * 2;
+      int width = options.width + margin * 2, height = options.height + margin * 2;
       std::array<uint32_t, 16> offsets{}, counts{}, kept{};
       std::vector<BrushStroke> input;
       std::vector<uint32_t> target(size_t(width) * height, options.background);
@@ -224,7 +226,7 @@ namespace mp42rhm {
           for (uint32_t x = 0; x < options.width; ++x) {
             const size_t p = (size_t(y) * options.width + x) * 3;
 
-            target[size_t(y + 64) * width + x + 64] = (uint32_t(pixels[p]) << 16) |
+            target[size_t(y + margin) * width + x + margin] = (uint32_t(pixels[p]) << 16) |
               (uint32_t(pixels[p + 1]) << 8) | pixels[p + 2];
           }
         const auto upload = [&](Device dest, const void* source, size_t bytes) {
@@ -246,7 +248,7 @@ namespace mp42rhm {
         for (; first < maximum; first += steps)
           call("cuLaunchKernel", kernel, 16U, 1U, 1U, 128U, 1U, 1U, 0U, slot->stream, args, static_cast<void**>(nullptr));
         void* cleanup_args[] = {&slot->output, &slot->input, &slot->offsets, &slot->counts,
-          &slot->owner, &slot->canvas, &slot->kept, &width, &height, &first, &steps};
+          &slot->owner, &slot->canvas, &slot->kept, &width, &height, &brush, &first, &steps};
         for (first = 0; first < maximum; first += steps)
           call("cuLaunchKernel", cleanup_kernel, 16U, 1U, 1U, 128U, 1U, 1U, 0U, slot->stream, cleanup_args, static_cast<void**>(nullptr));
         void* blank_args[] = {&slot->output, &slot->input, &slot->offsets, &slot->counts, &slot->kept};
@@ -254,17 +256,24 @@ namespace mp42rhm {
 
         call("cuMemcpyDtoHAsync_v2", kept.data(), slot->kept, sizeof(kept), slot->stream);
         call("cuStreamSynchronize", slot->stream);
-        const size_t best = std::min_element(kept.begin(), kept.end()) - kept.begin();
+        std::array<size_t, 16> order{};
 
-        call("cuMemcpyDtoHAsync_v2", input.data(), slot->input + size_t(offsets[best]) * sizeof(BrushStroke),
-          size_t(counts[best]) * sizeof(BrushStroke), slot->stream);
-        call("cuStreamSynchronize", slot->stream);
+        for (size_t i = 0; i < order.size(); ++i)
+          order[i] = i;
+        std::stable_sort(order.begin(), order.end(), [&](size_t a, size_t b) { return kept[a] < kept[b]; });
         candidates.clear();
-        candidates.resize(1);
-        candidates[0].reserve(kept[best]);
-        for (size_t n = 0; n < counts[best]; ++n)
-          if (input[n].x != INT32_MIN)
-            candidates[0].push_back(input[n]);
+        candidates.resize(2);
+        for (size_t rank = 0; rank < candidates.size(); ++rank) {
+          const size_t best = order[rank];
+
+          call("cuMemcpyDtoHAsync_v2", input.data(), slot->input + size_t(offsets[best]) * sizeof(BrushStroke),
+            size_t(counts[best]) * sizeof(BrushStroke), slot->stream);
+          call("cuStreamSynchronize", slot->stream);
+          candidates[rank].reserve(kept[best]);
+          for (size_t n = 0; n < counts[best]; ++n)
+            if (input[n].x != INT32_MIN)
+              candidates[rank].push_back(input[n]);
+        }
       } catch (...) {
         discard(dll, "cuStreamSynchronize", slot->stream);
         release();
@@ -284,9 +293,8 @@ namespace mp42rhm {
     return impl->slots.size();
   }
 
-  std::vector<BrushStroke> CudaBrushEncoder::compact(std::vector<std::vector<BrushStroke>>& candidates,
+  void CudaBrushEncoder::compact(std::vector<std::vector<BrushStroke>>& candidates,
     const std::vector<uint8_t>& pixels) {
     impl->compact(candidates, pixels);
-    return std::move(candidates.front());
   }
 }

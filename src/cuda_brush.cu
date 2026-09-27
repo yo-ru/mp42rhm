@@ -28,7 +28,7 @@ extern "C" __global__ void compact(const Stroke* input, Stroke* output, const un
   target += (group / groups_per_frame) * width * height;
   owner += group * width * height;
   __shared__ int warp_score[THREADS / 32], warp_rank[THREADS / 32];
-  __shared__ U64 row_exposed[64], row_bad[64];
+  __shared__ U64 row_exposed[128], row_bad[128], row_exposed_high[128], row_bad_high[128];
   __shared__ int min_x, min_y, nx, ny, original_count, chosen_x, chosen_y;
 
   for (int step = 0; step < steps; ++step) {
@@ -82,7 +82,8 @@ extern "C" __global__ void compact(const Stroke* input, Stroke* output, const un
       if (nx * ny > 8) {
         const int lane = tid % 32, warp = tid / 32;
         const int region_w = nx + brush - 1, region_h = ny + brush - 1;
-        const U64 region_mask = (U64(1) << region_w) - 1;
+        const U64 region_mask = region_w >= 64 ? ~U64(0) : (U64(1) << region_w) - 1;
+        const U64 high_mask = region_w > 64 ? (U64(1) << (region_w - 64)) - 1 : 0;
 
         for (int row = warp; row < region_h; row += THREADS / 32) {
           const int py = min_y + row;
@@ -97,29 +98,49 @@ extern "C" __global__ void compact(const Stroke* input, Stroke* output, const un
             row_exposed[row] = visible;
             row_bad[row] = bad;
           }
+          U64 visible_high = 0, bad_high = 0;
+
+          if (high_mask) {
+            visible_high = exposed(covered, words, min_x + 64, py, high_mask);
+            const bool c = lane + 64 < region_w && (visible_high & (U64(1) << lane)) &&
+              target[py * width + min_x + lane + 64] != stroke.color;
+            const bool d = lane + 96 < region_w && (visible_high & (U64(1) << (lane + 32))) &&
+              target[py * width + min_x + lane + 96] != stroke.color;
+
+            bad_high = U64(__ballot_sync(0xffffffff, c)) | (U64(__ballot_sync(0xffffffff, d)) << 32);
+          }
+          if (lane == 0) {
+            row_exposed_high[row] = visible_high;
+            row_bad_high[row] = bad_high;
+          }
         }
         __syncthreads();
         const int rows_per_warp = (ny + 3) / 4;
         const int begin = warp * rows_per_warp, end = imin(ny, begin + rows_per_warp);
 
-        if (lane < nx && begin < end) {
-          const U64 window = mask << lane;
+        for (int column = lane; column < nx && begin < end; column += 32) {
+          const U64 window = mask << column;
+          const U64 window_high = column ? mask >> (64 - column) : 0;
           int count = 0, bad = 0;
 
           for (int row = begin; row < begin + brush; ++row) {
             count += __popcll(row_exposed[row] & window);
-            bad += (row_bad[row] & window) != 0;
+            count += __popcll(row_exposed_high[row] & window_high);
+            bad += ((row_bad[row] & window) | (row_bad_high[row] & window_high)) != 0;
           }
           for (int cy = begin; cy < end; ++cy) {
-            const int rank = cy * nx + lane;
+            const int rank = cy * nx + column;
 
-            if (!bad && (min_x + lane != x || min_y + cy != y) && count > best) {
+            if (!bad && (min_x + column != x || min_y + cy != y) &&
+              (count > best || (count == best && rank < best_rank))) {
               best = count;
               best_rank = rank;
             }
             if (cy + 1 < end) {
               count += __popcll(row_exposed[cy + brush] & window) - __popcll(row_exposed[cy] & window);
-              bad += int((row_bad[cy + brush] & window) != 0) - int((row_bad[cy] & window) != 0);
+              count += __popcll(row_exposed_high[cy + brush] & window_high) - __popcll(row_exposed_high[cy] & window_high);
+              bad += int(((row_bad[cy + brush] & window) | (row_bad_high[cy + brush] & window_high)) != 0) -
+                int(((row_bad[cy] & window) | (row_bad_high[cy] & window_high)) != 0);
             }
           }
         }
@@ -200,7 +221,7 @@ extern "C" __global__ void compact(const Stroke* input, Stroke* output, const un
 
 extern "C" __global__ void cleanup(const Stroke* input, Stroke* output,
   const unsigned* offsets, const unsigned* counts, const unsigned* owner, unsigned* canvas,
-  unsigned* kept, int width, int height, int first, int steps) {
+  unsigned* kept, int width, int height, int brush, int first, int steps) {
   const int tid = threadIdx.x, group = blockIdx.x;
   owner += group * width * height;
   canvas += group * width * height;
@@ -216,16 +237,16 @@ extern "C" __global__ void cleanup(const Stroke* input, Stroke* output,
         output[offsets[group] + index] = stroke;
       continue;
     }
-    const int x = stroke.x + 64, y = stroke.y + 64;
+    const int x = stroke.x + brush * 2, y = stroke.y + brush * 2;
     bool needed = false;
 
-    for (int pixel = tid; pixel < 1024; pixel += 128) {
-      const int p = (y + pixel / 32) * width + x + pixel % 32;
+    for (int pixel = tid; pixel < brush * brush; pixel += THREADS) {
+      const int p = (y + pixel / brush) * width + x + pixel % brush;
       needed |= owner[p] == index + 1 && canvas[p] != stroke.color;
     }
     if (__syncthreads_or(needed)) {
-      for (int pixel = tid; pixel < 1024; pixel += 128)
-        canvas[(y + pixel / 32) * width + x + pixel % 32] = stroke.color;
+      for (int pixel = tid; pixel < brush * brush; pixel += THREADS)
+        canvas[(y + pixel / brush) * width + x + pixel % brush] = stroke.color;
       if (!tid) {
         output[offsets[group] + index] = stroke;
         kept[group]++;

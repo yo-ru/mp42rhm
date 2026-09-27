@@ -1,4 +1,5 @@
 #include "converter.h"
+#include "brush_optimizer.h"
 #include "archive.h"
 #include "process.h"
 #include "note_order.h"
@@ -15,6 +16,7 @@
 #include <iomanip>
 #include <iostream>
 #include <iterator>
+#include <random>
 #include <stdexcept>
 #include <vector>
 
@@ -104,6 +106,388 @@ static void test_large_archive(const fs::path& directory) {
   fclose(input);
 }
 
+static void test_brush_reordering() {
+  std::mt19937 random(20260927);
+  size_t saved = 0;
+
+  for (uint32_t brush = 1; brush <= 64; ++brush)
+    for (int trial = 0; trial < 12; ++trial) {
+      mp42rhm::Options options;
+
+      options.width = trial % 2 ? 83 : 17;
+      options.height = trial % 2 ? 73 : 13;
+      options.brush_size = brush;
+      options.background = trial % 3 ? 0 : 0x345678;
+      const int margin = brush * 2, width = options.width + margin * 2;
+      const int height = options.height + margin * 2;
+      std::vector<uint32_t> expected(size_t(width) * height, options.background);
+      std::vector<uint32_t> actual(expected);
+      std::vector<mp42rhm::BrushStroke> strokes;
+      const auto paint = [&](auto& canvas, const auto& stroke) {
+        for (int y = stroke.y; y < stroke.y + static_cast<int>(brush); ++y)
+          std::fill_n(canvas.begin() + size_t(y + margin) * width + stroke.x + margin, brush, stroke.color);
+      };
+      const auto add = [&](int x, int y, uint32_t color) {
+        strokes.push_back({x, y, color});
+        paint(expected, strokes.back());
+      };
+
+      for (int i = 0; i < trial * 12; ++i)
+        add(static_cast<int>(random() % (options.width + brush - 1)) - static_cast<int>(brush) + 1,
+          static_cast<int>(random() % (options.height + brush - 1)) - static_cast<int>(brush) + 1,
+          trial % 2 ? random() & 0xffffff : random() % 2 * 0xffffff);
+      for (int y = -static_cast<int>(brush); y < static_cast<int>(options.height + brush); y += brush) {
+        add(-static_cast<int>(brush), y, options.background);
+        add(options.width, y, options.background);
+      }
+      for (int x = 0; x < static_cast<int>(options.width); x += brush) {
+        add(x, -static_cast<int>(brush), options.background);
+        add(x, options.height, options.background);
+      }
+      std::vector<uint8_t> pixels(size_t(options.width) * options.height * 3);
+
+      for (uint32_t y = 0; y < options.height; ++y)
+        for (uint32_t x = 0; x < options.width; ++x) {
+          const auto color = expected[size_t(y + margin) * width + x + margin];
+          const size_t p = (size_t(y) * options.width + x) * 3;
+
+          pixels[p] = static_cast<uint8_t>(color >> 16);
+          pixels[p + 1] = static_cast<uint8_t>(color >> 8);
+          pixels[p + 2] = static_cast<uint8_t>(color);
+        }
+      const auto single = mp42rhm::reorder_brush_strokes(strokes, pixels, options);
+      const auto result = mp42rhm::reorder_brush_strokes(strokes, pixels, options, single);
+      const auto repeat = mp42rhm::reorder_brush_strokes(strokes, pixels, options, single);
+
+      for (const auto& stroke : single)
+        paint(actual, stroke);
+      require(actual == expected, "Single-candidate reordering changed pixels");
+      std::fill(actual.begin(), actual.end(), options.background);
+
+      require(!result.empty() && result.size() <= strokes.size(), "Reordering must retain timing without adding notes");
+      require(result.size() == repeat.size(), "Reordering must be deterministic");
+      for (size_t i = 0; i < result.size(); ++i) {
+        require(result[i].x == repeat[i].x && result[i].y == repeat[i].y && result[i].color == repeat[i].color,
+          "Reordered stroke mismatch");
+        paint(actual, result[i]);
+      }
+      require(actual == expected, "Reordering changed pixels or left brush spill");
+      saved += strokes.size() - result.size();
+    }
+  require(saved > 0, "Reordering did not remove any strokes");
+}
+
+static std::vector<uint32_t> render_brush_map(const mp42rhm::Options& options, size_t frames) {
+  const auto map = options.format == mp42rhm::Format::Sspm ? read_sspm_v2(options.output) : read_map(options.output);
+  std::ifstream file(options.colorset);
+  std::vector<uint32_t> colors;
+  std::vector<uint64_t> order(map.map.notes.size());
+  std::string line;
+  const int margin = options.brush_size * 2, width = options.width + margin * 2;
+  const int height = options.height + margin * 2;
+  const double pitch = options.span ? options.span / options.width : .01;
+  std::vector<uint32_t> canvas(size_t(width) * height * frames, options.background);
+
+  while (std::getline(file, line))
+    colors.push_back(mp42rhm::parse_color(line));
+  require(!colors.empty(), "Empty brush colorset");
+  for (size_t i = 0; i < order.size(); ++i)
+    order[i] = uint64_t(map.map.notes[i].time) << 32 | i;
+  mp42rhm::sort_note_indices(order);
+  for (size_t rank = order.size(); rank-- > 0;) {
+    const auto& note = map.map.notes[static_cast<uint32_t>(order[rank])];
+    size_t frame = 0;
+
+    while (frame < frames && mp42rhm::frame_time(frame + 1, options.fps) != note.time)
+      ++frame;
+    require(frame < frames, "Map contains a non-frame timestamp");
+    if (note.x == 100 && note.y == 100)
+      continue;
+    const int x = static_cast<int>(std::lround((note.x - 1) / pitch + options.width / 2.0 - options.brush_size / 2.0)) + margin;
+    const int y = static_cast<int>(std::lround((note.y - 1) / pitch + options.height / 2.0 - options.brush_size / 2.0)) + margin;
+
+    require(x >= 0 && y >= 0 && x + int(options.brush_size) <= width && y + int(options.brush_size) <= height,
+      "Brush escaped verification canvas");
+    for (int row = y; row < y + int(options.brush_size); ++row)
+      std::fill_n(canvas.begin() + (frame * height + row) * width + x, options.brush_size, colors[rank % colors.size()]);
+  }
+  return canvas;
+}
+
+static void test_cuda_brush_sizes(const fs::path& directory) {
+  const auto raw = directory / L"cuda-wide.rgb", video = directory / L"cuda-wide.mkv";
+  const auto palette = directory / L"cuda-wide-palette.txt";
+  const uint32_t colors[] = {0x112233, 0xff0000, 0x00ff00, 0x0000ff, 0xffffff};
+  std::vector<uint8_t> pixels;
+
+  std::ofstream(palette) << "#ff0000\n#00ff00\n#0000ff\n#ffffff\n";
+  for (int frame = 0; frame < 2; ++frame)
+    for (int y = 0; y < 97; ++y)
+      for (int x = 0; x < 133; ++x) {
+        const bool detail = (x * 7 + y * 11) % 137 < 3;
+        const auto color = colors[detail ? (x + y + frame) % 5 : (x / 39 + y / 29 + frame) % 5];
+
+        pixels.push_back(static_cast<uint8_t>(color >> 16));
+        pixels.push_back(static_cast<uint8_t>(color >> 8));
+        pixels.push_back(static_cast<uint8_t>(color));
+      }
+  std::ofstream(raw, std::ios::binary).write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
+  mp42rhm::Process fixture({L"ffmpeg.exe", L"-v", L"error", L"-f", L"rawvideo", L"-pixel_format", L"rgb24",
+    L"-video_size", L"133x97", L"-framerate", L"24", L"-i", raw.wstring(),
+    L"-c:v", L"ffv1", L"-pix_fmt", L"bgr0", video.wstring()});
+
+  fixture.finish();
+  for (const uint32_t brush : {2, 3, 8, 16, 31, 32, 33, 63, 64}) {
+    mp42rhm::Options options;
+    const auto name = "cuda-wide-" + std::to_string(brush);
+
+    options.input = video;
+    options.output = directory / (name + "-cpu.sspm");
+    options.colorset = directory / (name + "-cpu.txt");
+    options.palette_cycle = palette;
+    options.mode = mp42rhm::ColorMode::Color;
+    options.background = colors[0];
+    options.width = 133;
+    options.height = 97;
+    options.fps = 24;
+    options.brush_size = brush;
+    options.audio = false;
+    const auto cpu_stats = mp42rhm::convert(options);
+    const auto cpu_map = read_sspm_v2(options.output);
+    std::ifstream cpu_file(options.colorset, std::ios::binary);
+    const std::vector<char> cpu_colors((std::istreambuf_iterator<char>(cpu_file)), {});
+
+    options.output = directory / (name + "-gpu.sspm");
+    options.colorset = directory / (name + "-gpu.txt");
+    options.experimental_cuda = true;
+    const auto gpu_stats = mp42rhm::convert(options);
+    std::ifstream gpu_file(options.colorset, std::ios::binary);
+    const std::vector<char> gpu_colors((std::istreambuf_iterator<char>(gpu_file)), {});
+
+    require(cpu_stats.notes == gpu_stats.notes && cpu_stats.peak_frame_notes == gpu_stats.peak_frame_notes,
+      "Wide CUDA brush note counts differ from CPU");
+    check_sspm(options.output, cpu_map);
+    require(cpu_colors == gpu_colors, "Wide CUDA brush colors differ from CPU");
+    const auto actual = render_brush_map(options, 2);
+    const int margin = brush * 2, width = 133 + margin * 2, height = 97 + margin * 2;
+
+    for (int frame = 0; frame < 2; ++frame)
+      for (int y = 0; y < height; ++y)
+        for (int x = 0; x < width; ++x) {
+          uint32_t expected = options.background;
+
+          if (x >= margin && x < margin + 133 && y >= margin && y < margin + 97) {
+            const size_t p = ((frame * 97 + y - margin) * 133 + x - margin) * 3;
+
+            expected = uint32_t(pixels[p]) << 16 | uint32_t(pixels[p + 1]) << 8 | pixels[p + 2];
+          }
+          require(actual[(frame * height + y) * width + x] == expected,
+            "Wide CUDA brush changed pixels or left edge spill");
+        }
+    options.brush_size = 1;
+    must_fail([&] { mp42rhm::validate(options); });
+  }
+}
+
+static void test_new_modes(const fs::path& directory, const fs::path& executable, bool cuda) {
+  const auto raw_path = directory / L"adaptive.rgb", video = directory / L"adaptive.mkv";
+  std::vector<uint8_t> pixels;
+
+  for (int frame = 0; frame < 3; ++frame)
+    for (int y = 0; y < 16; ++y)
+      for (int x = 0; x < 32; ++x) {
+        pixels.push_back(frame == 2 ? 0 : static_cast<uint8_t>(x * 8));
+        pixels.push_back(frame == 2 ? 0 : static_cast<uint8_t>(y * 16));
+        pixels.push_back(frame == 2 ? 0 : static_cast<uint8_t>((x + y + frame * 11) * 4));
+      }
+  std::ofstream(raw_path, std::ios::binary).write(reinterpret_cast<const char*>(pixels.data()), pixels.size());
+  mp42rhm::Process fixture({L"ffmpeg.exe", L"-v", L"error", L"-f", L"rawvideo", L"-pixel_format", L"rgb24",
+    L"-video_size", L"32x16", L"-framerate", L"24000/1001", L"-i", raw_path.wstring(),
+    L"-c:v", L"ffv1", L"-pix_fmt", L"bgr0", video.wstring()});
+
+  fixture.finish();
+  mp42rhm::Options options;
+
+  options.input = video;
+  options.output = directory / L"adaptive-cli.sspm";
+  options.colorset = directory / L"adaptive-cli-colorset.txt";
+  options.mode = mp42rhm::ColorMode::Color;
+  options.adaptive_palette = true;
+  options.color_count = 1024;
+  options.width = 32;
+  options.height = 16;
+  options.fps = {24000, 1001};
+  options.brush_size = cuda ? 32 : 8;
+  options.audio = false;
+  std::vector<std::wstring> command{executable.wstring(), video.wstring(), options.output.wstring(),
+    L"--adaptive-palette", L"--colors", L"1024", L"--width", L"32", L"--height", L"16",
+    L"--brush-size", std::to_wstring(options.brush_size), L"--fps", L"native", L"--no-audio"};
+
+  if (cuda)
+    command.push_back(L"--experimental-cuda");
+  mp42rhm::Process adaptive(command);
+
+  require(adaptive.finish().find("Exported 3 frames") != std::string::npos, "Native FPS changed frame count");
+  const auto actual = render_brush_map(options, 3);
+  const size_t margin = options.brush_size * 2, width = 32 + margin * 2, height = 16 + margin * 2;
+
+  for (size_t f = 0; f < 3; ++f)
+    for (size_t y = 0; y < height; ++y)
+      for (size_t x = 0; x < width; ++x) {
+        uint32_t expected = 0;
+
+        if (x >= margin && x < 32 + margin && y >= margin && y < 16 + margin) {
+          const size_t p = (f * 512 + (y - margin) * 32 + x - margin) * 3;
+
+          expected = uint32_t(pixels[p]) << 16 | uint32_t(pixels[p + 1]) << 8 | pixels[p + 2];
+        }
+        require(actual[(f * height + y) * width + x] == expected, "Adaptive palette changed an already-small palette");
+      }
+  options.color_count = 32;
+  options.output = directory / L"adaptive-quantized.sspm";
+  options.colorset = directory / L"adaptive-quantized.txt";
+  options.experimental_cuda = cuda;
+  mp42rhm::convert(options);
+  const auto quantized = render_brush_map(options, 3);
+  mp42rhm::Process reference_decoder({L"ffmpeg.exe", L"-v", L"error", L"-i", video.wstring(),
+    L"-vf", L"setpts=PTS-STARTPTS,fps=24000/1001:start_time=0,format=rgb24,elbg=codebook_length=31:nb_steps=1:seed=1",
+    L"-pix_fmt", L"rgb24", L"-f", L"rawvideo", L"pipe:1"});
+  const auto reference_pixels = reference_decoder.finish();
+
+  require(reference_pixels.size() == pixels.size(), "Adaptive reference frame count");
+  for (size_t f = 0; f < 3; ++f)
+    for (size_t y = 0; y < height; ++y)
+      for (size_t x = 0; x < width; ++x) {
+        uint32_t expected = 0;
+
+        if (x >= margin && x < 32 + margin && y >= margin && y < 16 + margin) {
+          const size_t p = (f * 512 + (y - margin) * 32 + x - margin) * 3;
+
+          expected = uint32_t(static_cast<uint8_t>(reference_pixels[p])) << 16 |
+            uint32_t(static_cast<uint8_t>(reference_pixels[p + 1])) << 8 | static_cast<uint8_t>(reference_pixels[p + 2]);
+        }
+        require(quantized[(f * height + y) * width + x] == expected, "Adaptive export changed quantized pixels");
+      }
+  for (auto mode : {mp42rhm::ColorMode::Bw, mp42rhm::ColorMode::Grayscale}) {
+    options.mode = mode;
+    options.adaptive_palette = false;
+    options.compact_colorset = true;
+    options.color_count = mode == mp42rhm::ColorMode::Bw ? 0 : 8;
+    options.experimental_cuda = cuda;
+    const auto name = mode == mp42rhm::ColorMode::Bw ? L"compact-bw" : L"compact-gray";
+
+    options.output = directory / (std::wstring(name) + L".sspm");
+    options.colorset = directory / (std::wstring(name) + L".txt");
+    const auto stats = mp42rhm::convert(options);
+    const auto compact = render_brush_map(options, 3);
+    if (mode == mp42rhm::ColorMode::Grayscale) {
+      auto control = options;
+
+      control.compact_colorset = false;
+      control.output = directory / L"gray-control.sspm";
+      control.colorset = directory / L"gray-control.txt";
+      mp42rhm::convert(control);
+      require(compact == render_brush_map(control, 3), "Compact colorset changed grayscale pixels");
+      control.compact_colorset = true;
+      control.format = mp42rhm::Format::Rhm;
+      control.output = directory / L"compact-gray.rhm";
+      control.colorset = directory / L"compact-gray-rhm.txt";
+      mp42rhm::convert(control);
+      require(compact == render_brush_map(control, 3), "Compact RHM and SSPM differ");
+    } else {
+      mp42rhm::Process grayscale({L"ffmpeg.exe", L"-v", L"error", L"-i", video.wstring(),
+        L"-vf", L"fps=24000/1001,format=gray", L"-pix_fmt", L"gray", L"-f", L"rawvideo", L"pipe:1"});
+      const auto reference = grayscale.finish();
+
+      require(reference.size() == 3 * 512, "BW reference length");
+      for (size_t f = 0; f < 3; ++f)
+        for (size_t y = 0; y < height; ++y)
+          for (size_t x = 0; x < width; ++x) {
+            uint32_t expected = 0;
+
+            if (x >= margin && x < 32 + margin && y >= margin && y < 16 + margin &&
+              static_cast<uint8_t>(reference[f * 512 + (y - margin) * 32 + x - margin]) >= options.threshold)
+              expected = 0xffffff;
+            require(compact[(f * height + y) * width + x] == expected, "Compact colorset changed BW pixels");
+          }
+    }
+    require(stats.frames == 3 && fs::file_size(options.colorset) < 512, "Compact colorset or frame count");
+    require(stats.filler_notes > 0 && stats.notes % (fs::file_size(options.colorset) / 8) == 0,
+      "Compact colorset phase or filler accounting");
+    const auto exact_budget = stats.notes;
+
+    options.output = directory / (std::wstring(name) + L"-budget.sspm");
+    options.colorset = directory / (std::wstring(name) + L"-budget.txt");
+    options.max_notes = exact_budget;
+    require(mp42rhm::convert(options).notes == exact_budget, "Exact compact note budget failed");
+    options.output = directory / (std::wstring(name) + L"-overflow.sspm");
+    options.colorset = directory / (std::wstring(name) + L"-overflow.txt");
+    options.max_notes = exact_budget - 1;
+    must_fail([&] { mp42rhm::convert(options); });
+    require(!fs::exists(options.output) && !fs::exists(options.colorset), "Published partial compact map");
+    options.max_notes = 100000000;
+  }
+
+  const auto subtitle_directory = directory / L"subtitle ' [test], &";
+
+  fs::create_directory(subtitle_directory);
+  const auto english = subtitle_directory / L"english.srt", other = subtitle_directory / L"other.srt";
+  const auto subtitled_video = subtitle_directory / L"episode.mkv";
+
+  std::ofstream(english) << "1\n00:00:01,100 --> 00:00:01,600\nEnglish track test\n";
+  std::ofstream(other) << "1\n00:00:00,000 --> 00:00:02,000\nOther track\n";
+  mp42rhm::Process subtitle_fixture({L"ffmpeg.exe", L"-v", L"error", L"-f", L"lavfi", L"-i",
+    L"color=black:s=320x180:r=24:d=2", L"-i", english.wstring(), L"-i", other.wstring(),
+    L"-map", L"0:v", L"-map", L"1:s", L"-map", L"2:s", L"-c:v", L"ffv1", L"-c:s", L"ass", subtitled_video.wstring()});
+
+  subtitle_fixture.finish();
+  options = {};
+  options.input = subtitled_video;
+  options.output = subtitle_directory / L"subtitles.sspm";
+  options.colorset = subtitle_directory / L"subtitles-colorset.txt";
+  options.width = 320;
+  options.height = 180;
+  options.fps = 24;
+  options.brush_size = 8;
+  mp42rhm::Process subtitles({executable.wstring(), subtitled_video.wstring(), options.output.wstring(),
+    L"--mode", L"grayscale", L"--colors", L"8", L"--width", L"320", L"--height", L"180", L"--fps", L"native",
+    L"--subtitles", L"1", L"--start", L"1", L"--seconds", L"1", L"--no-audio"});
+
+  require(subtitles.finish().find("Exported 24 frames") != std::string::npos, "Subtitle export frame count");
+  const auto subtitles_canvas = render_brush_map(options, 24);
+  const size_t subtitle_width = 352, subtitle_height = 212;
+  std::array<size_t, 24> lit{};
+
+  for (size_t f = 0; f < 24; ++f)
+    for (size_t y = 0; y < subtitle_height; ++y)
+      for (size_t x = 0; x < subtitle_width; ++x) {
+        const auto color = subtitles_canvas[(f * subtitle_height + y) * subtitle_width + x];
+
+        if (color) {
+          require(y >= 16 + 144 && y < 16 + 180 && x >= 16 && x < 16 + 320, "Subtitle escaped its band");
+          ++lit[f];
+        }
+      }
+  require(lit[0] == 0 && lit[6] > 30 && lit[12] > 30 && lit[20] == 0, "Subtitle track or seek timing is wrong");
+  options.output = directory / L"invalid-new-mode.sspm";
+  options.colorset = directory / L"invalid-new-mode.txt";
+  options.subtitle_track = 0;
+  options.width = 3840;
+  options.height = 2160;
+  options.mode = mp42rhm::ColorMode::Color;
+  options.adaptive_palette = true;
+  options.color_count = 65536;
+  mp42rhm::validate(options);
+  options.width = 3841;
+  must_fail([&] { mp42rhm::validate(options); });
+  options.width = 3840;
+  options.adaptive_palette = false;
+  must_fail([&] { mp42rhm::validate(options); });
+  options.adaptive_palette = true;
+  options.compact_colorset = true;
+  must_fail([&] { mp42rhm::validate(options); });
+}
+
 int main(int argc, char** argv) {
   try {
     if (argc == 3 && std::string(argv[1]) == "--normalize") {
@@ -119,11 +503,20 @@ int main(int argc, char** argv) {
       std::cout << "All archive entries passed decompression and CRC checks\n";
       return 0;
     }
+    test_brush_reordering();
     require(mp42rhm::frame_time(1, 60) == 17, "First frame end");
     require(mp42rhm::frame_time(2, 60) == 33, "Second frame end");
     require(mp42rhm::frame_time(3, 60) == 50, "Third frame end");
     require(mp42rhm::frame_time(60 * 3600, 60) == 3600000, "Long-term timing drift");
     must_fail([] { mp42rhm::frame_time(UINT64_MAX, 60); });
+    require(mp42rhm::frame_time(24000, {24000, 1001}) == 1001000, "Fractional FPS drift");
+    require(mp42rhm::frame_time(24000ULL * 600, {24000, 1001}) == 600600000,
+      "Fractional FPS long-run timing");
+    const auto fractional = mp42rhm::parse_frame_rate("23.976");
+
+    require(fractional.numerator == 2997 && fractional.denominator == 125, "Decimal FPS parsing");
+    for (const auto text : {"0", "24000/0", "0/0", "61", "1/2", "12junk", "23.1234567", "nan"})
+      must_fail([&] { mp42rhm::parse_frame_rate(text); });
     for (const auto& fixture : SORT_FIXTURES) {
       std::vector<uint64_t> order(fixture.count);
 
@@ -151,6 +544,10 @@ int main(int argc, char** argv) {
       std::cout << "ZIP64 payload above 4 GiB passed size, decompression, and CRC checks\n";
       return 0;
     }
+    test_new_modes(directory, fs::absolute(argv[0]).parent_path() / L"mp42rhm.exe",
+      argc == 2 && std::string(argv[1]) == "--cuda");
+    if (argc == 2 && std::string(argv[1]) == "--cuda")
+      test_cuda_brush_sizes(directory);
     const auto raw_path = directory / L"pixels.rgb";
     const auto video_path = directory / L"test & sample.mp4";
     const uint8_t pixels[] = {
@@ -170,7 +567,8 @@ int main(int argc, char** argv) {
 
     mp42rhm::Options options;
 
-    require(options.fps == 12 && options.max_notes == 100000000, "Full-video defaults changed");
+    require(options.fps.numerator == 12 && options.fps.denominator == 1 && options.max_notes == 100000000,
+      "Full-video defaults changed");
     const auto executable = fs::absolute(argv[0]).parent_path() / L"mp42rhm.exe";
     const auto cli_video = directory / L"cli.mp4";
     mp42rhm::Process cli_fixture({L"ffmpeg.exe", L"-hide_banner", L"-loglevel", L"error", L"-nostdin",
@@ -487,9 +885,11 @@ int main(int argc, char** argv) {
       L"-i", brush_raw.wstring(), L"-c:v", L"libx264rgb", L"-crf", L"0", L"-preset", L"ultrafast", brush_video.wstring()});
 
     brush_fixture.finish();
-    for (unsigned variant = 0; variant < 8; ++variant) {
+    const std::array<uint32_t, 9> brush_sizes{2, 3, 8, 16, 31, 32, 33, 63, 64};
+
+    for (unsigned variant = 0; variant < brush_sizes.size() * 2; ++variant) {
       const auto format = variant % 2 ? mp42rhm::Format::Rhm : mp42rhm::Format::Sspm;
-      const uint32_t brush = std::array<uint32_t, 4>{3, 8, 32, 64}[variant / 2];
+      const uint32_t brush = brush_sizes[variant / 2];
       const int margin = brush * 2, canvas_width = 13 + margin * 2, canvas_height = 9 + margin * 2;
       const size_t canvas_size = size_t(canvas_width) * canvas_height;
       auto brush_options = compensated_options;
@@ -552,7 +952,7 @@ int main(int argc, char** argv) {
             }
             require(canvas[frame * canvas_size + y * canvas_width + x] == expected, "Brush repaint changed pixels or left edge spill");
           }
-      if (brush == 32 && argc == 2 && std::string(argv[1]) == "--cuda") {
+      if (argc == 2 && std::string(argv[1]) == "--cuda") {
         auto gpu_options = brush_options;
 
         gpu_options.experimental_cuda = true;

@@ -1,5 +1,6 @@
 #pragma once
 
+#include "frame_rate.h"
 #include <cstdint>
 #include <filesystem>
 #include <string>
@@ -23,7 +24,7 @@ namespace mp42rhm {
     std::wstring ffprobe = L"ffprobe.exe";
     uint32_t width = 160;
     uint32_t height = 90;
-    uint32_t fps = 12;
+    FrameRate fps;
     uint32_t brush_size = 1;
     uint32_t threshold = 128;
     uint64_t max_notes = 100000000;
@@ -33,6 +34,9 @@ namespace mp42rhm {
     bool invert = false;
     bool audio = true;
     bool experimental_cuda = false;
+    bool adaptive_palette = false;
+    bool compact_colorset = false;
+    uint32_t subtitle_track = 0;
   };
 
   struct Statistics {
@@ -43,7 +47,6 @@ namespace mp42rhm {
     int32_t duration_ms = 0;
   };
 
-  int32_t frame_time(uint64_t frame, uint32_t fps);
   uint32_t parse_color(const std::string& text);
   void validate(const Options& options);
   Statistics convert(const Options& options);

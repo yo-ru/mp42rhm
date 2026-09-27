@@ -15,7 +15,7 @@ namespace mp42rhm {
     explicit CudaBrushEncoder(const Options& options);
     ~CudaBrushEncoder();
     size_t parallel_frames() const;
-    std::vector<BrushStroke> compact(std::vector<std::vector<BrushStroke>>& candidates,
+    void compact(std::vector<std::vector<BrushStroke>>& candidates,
       const std::vector<uint8_t>& pixels);
 
   private:

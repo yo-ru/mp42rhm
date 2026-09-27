@@ -26,16 +26,29 @@ Add `--seconds 5` for a preview. Defaults: black and white, 160x90, 12 fps, 100 
 
 `--help` lists common controls. `--help-all` lists every option.
 
-`--experimental-cuda` enables NVIDIA acceleration for color/grayscale and defaults to 32-pixel brushes. Other brush sizes are unsupported. Requires an NVIDIA driver and CUDA 12/13 NVRTC with its matching builtins DLL beside the executable or on PATH. Frame batching adjusts to available VRAM; CPU encoding remains the default.
+Resolution supports up to 3840x2160. `--fps` accepts decimals, fractions such as `24000/1001`, or `native` for the source's average frame rate.
+
+| Option | Behavior |
+|---|---|
+| `--adaptive-palette` | Per-frame color palettes; `--colors` supports 2..65536 including the background. Requires color brushes. |
+| `--compact-colorset` | Tiny repeating colorsets for BW/grayscale brushes. Adds an analysis pass, temporary disk use, and offscreen filler notes. |
+| `--subtitles N` | Burns text subtitle track N (1-based) into a black band inside the output dimensions, using plain white text. |
+
+```powershell
+.\build\Release\mp42rhm.exe video.mp4 adaptive --adaptive-palette --colors 2048 --fps native
+.\build\Release\mp42rhm.exe episode.mkv episode --mode grayscale --compact-colorset --width 640 --height 480 --subtitles 1
+```
+
+`--experimental-cuda` enables NVIDIA acceleration for color/grayscale and compact BW. Brush sizes 2..64 are supported, defaulting to 32. Requires an NVIDIA driver and CUDA 12/13 NVRTC with its matching builtins DLL beside the executable or on PATH. Frame batching adjusts to available VRAM; CPU encoding remains the default.
 
 ## Encoding
 
 1. FFmpeg decodes frames at the requested FPS and fits them to the output resolution, preserving aspect ratio with padding.
-2. Black and white uses a brightness threshold. Grayscale uses fixed levels; color uses a generated or supplied palette, without dithering.
-3. Frames become simultaneous square notes. Color/grayscale brush mode compares 16 painting orders, repositions overlapping squares, and removes redundant strokes. It preserves the pixels after scaling and palette conversion; deeper optimization takes longer to encode.
+2. Black and white uses a brightness threshold. Grayscale uses fixed levels; color uses a global or adaptive per-frame palette, without dithering.
+3. Frames become simultaneous square notes. Brush mode compares 16 painting orders, repositions squares, then combines and reorders strokes from the best two results to remove more notes. Pixels remain exact after scaling and palette conversion; the extra search takes longer to encode.
 4. Note order is compensated for Steam's sorting and reverse draw order. Notes and MP3 audio are packaged as SSPM v2 or RHM.
 
-Brush colorsets contain one line per note. `--colors` controls unique palette colors, not the number of lines.
+Brush colorsets normally contain one line per note. Compact mode repeats a short sequence and schedules strokes around it without changing pixels. `--colors` controls palette size, not colorset length.
 
 ## Playback
 

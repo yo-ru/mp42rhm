@@ -1,4 +1,5 @@
 #include "converter.h"
+#include "process.h"
 
 #include <Windows.h>
 #include <cmath>
@@ -11,7 +12,7 @@ static void usage(bool all) {
     "Usage: mp42rhm input.mp4 output [options]\n\n"
     "  --mode MODE             bw, grayscale, color (bw)\n"
     "  --width N --height N    Resolution (160x90)\n"
-    "  --fps N                 Frame rate (12)\n"
+    "  --fps RATE              Frame rate, fraction, or native (12)\n"
     "  --colors N              Palette size (gray: 4, color: 64)\n"
     "  --seconds N             Clip duration (full video)\n"
     "  --max-notes N           Note budget (100000000)\n"
@@ -26,7 +27,10 @@ static void usage(bool all) {
     "  --format sspm|rhm       Map format (SSPM v2)\n"
     "  --difficulty-name TEXT  Difficulty label\n"
     "  --brush-size N          Brush pixels (bw: 1, gray/color: 8)\n"
-    "  --experimental-cuda     NVIDIA encoder (32-pixel brushes)\n"
+    "  --experimental-cuda     NVIDIA encoder (default brush size: 32)\n"
+    "  --adaptive-palette      Per-frame color palette, up to 65536 colors\n"
+    "  --compact-colorset      Repeating BW/grayscale brush colorset\n"
+    "  --subtitles N           Text subtitle track in a black band (1-based)\n"
     "  --span N                Image width (default: width * 0.01)\n"
     "  --palette-cycle PATH    Custom color palette\n"
     "  --threshold N           Black/white threshold (128)\n"
@@ -88,6 +92,7 @@ int wmain(int argc, wchar_t** argv) {
     mp42rhm::Options options;
     bool mode_set = false;
     bool brush_set = false;
+    bool native_fps = false;
 
     options.input = argv[1];
     options.output = argv[2];
@@ -104,6 +109,14 @@ int wmain(int argc, wchar_t** argv) {
       }
       if (key == L"--experimental-cuda") {
         options.experimental_cuda = true;
+        continue;
+      }
+      if (key == L"--adaptive-palette") {
+        options.adaptive_palette = true;
+        continue;
+      }
+      if (key == L"--compact-colorset") {
+        options.compact_colorset = true;
         continue;
       }
       const auto value = [&]() {
@@ -134,16 +147,24 @@ int wmain(int argc, wchar_t** argv) {
         else
           throw std::runtime_error("Expected --mode bw, grayscale, or color");
       } else if (key == L"--colors") {
-        options.color_count = static_cast<uint32_t>(integer(value(), 256));
+        options.color_count = static_cast<uint32_t>(integer(value(), 65536));
         if (options.color_count < 2)
-          throw std::runtime_error("Colors must be between 2 and 256");
+          throw std::runtime_error("Colors must be at least 2");
       } else if (key == L"--width")
-        options.width = static_cast<uint32_t>(integer(value(), 1920));
+        options.width = static_cast<uint32_t>(integer(value(), 3840));
       else if (key == L"--height")
-        options.height = static_cast<uint32_t>(integer(value(), 1080));
-      else if (key == L"--fps")
-        options.fps = static_cast<uint32_t>(integer(value(), 60));
-      else if (key == L"--brush-size") {
+        options.height = static_cast<uint32_t>(integer(value(), 2160));
+      else if (key == L"--fps") {
+        const auto rate = value();
+
+        native_fps = rate == L"native";
+        if (!native_fps)
+          options.fps = mp42rhm::parse_frame_rate(utf8(rate));
+      } else if (key == L"--subtitles") {
+        options.subtitle_track = static_cast<uint32_t>(integer(value(), UINT32_MAX));
+        if (!options.subtitle_track)
+          throw std::runtime_error("Subtitle tracks are numbered from 1");
+      } else if (key == L"--brush-size") {
         options.brush_size = static_cast<uint32_t>(integer(value(), 64));
         brush_set = true;
       } else if (key == L"--threshold")
@@ -176,20 +197,26 @@ int wmain(int argc, wchar_t** argv) {
 
     if (!options.output.has_extension())
       options.output += options.format == mp42rhm::Format::Sspm ? L".sspm" : L".rhm";
-    if (!mode_set && !options.palette_cycle.empty())
+    if (!mode_set && (!options.palette_cycle.empty() || options.adaptive_palette))
       options.mode = mp42rhm::ColorMode::Color;
-    if (!brush_set && options.mode != mp42rhm::ColorMode::Bw)
+    if (!brush_set && (options.mode != mp42rhm::ColorMode::Bw || options.compact_colorset))
       options.brush_size = options.experimental_cuda ? 32 : 8;
     if (options.colorset.empty())
       options.colorset = options.output.parent_path() / (options.output.stem().wstring() + L"-colorset.txt");
+    if (native_fps) {
+      mp42rhm::Process probe({options.ffprobe, L"-v", L"error", L"-select_streams", L"v:0",
+        L"-show_entries", L"stream=avg_frame_rate", L"-of", L"default=nw=1:nk=1", options.input.wstring()});
+
+      options.fps = mp42rhm::parse_frame_rate(probe.finish());
+    }
     mp42rhm::validate(options);
 
-    std::cerr << "Converting " << options.width << 'x' << options.height << " at " << options.fps << " fps...\n";
+    std::cerr << "Converting " << options.width << 'x' << options.height << " at " << options.fps.value() << " fps...\n";
 
     const auto result = mp42rhm::convert(options);
     const double note_scale = (options.span == 0 ? 0.01 : options.span / options.width) * options.brush_size;
     // Round AR up to avoid overlapping quantized video frames
-    const double approach_rate = std::ceil(1000.0 / (1000 / options.fps)) / 100;
+    const double approach_rate = std::ceil(1000.0 / std::floor(1000.0 / options.fps.value())) / 100;
 
     std::cout << "Exported " << result.frames << " frames, " << result.notes
       << " notes (peak " << result.peak_frame_notes << "/frame).\n\n"

@@ -104,7 +104,7 @@ namespace mp42rhm {
   }
 
   void compensate_note_order(const std::filesystem::path& input_path, const std::filesystem::path& output_path,
-    const std::vector<uint32_t>& frame_counts, uint32_t fps) {
+    const std::vector<uint32_t>& frame_counts, FrameRate fps) {
     const uint64_t count = std::accumulate(frame_counts.begin(), frame_counts.end(), uint64_t{0});
 
     if (count > INT32_MAX)

@@ -28,10 +28,16 @@ Omit `--seconds` for the full video. Use `--start` to select a clip, `--title` f
 - `--mode bw`: thresholded black and white.
 - `--mode grayscale`: 4 levels by default.
 - `--mode color`: automatic compact palette, up to 64 colors by default.
-- `--colors 2..256`: grayscale/color palette size, including the background.
+- `--colors 2..256`: grayscale/global color palette size, including the background.
+- `--adaptive-palette`: per-frame color palettes, supporting `--colors 2..65536`. Requires color brushes; remains opt-in.
+- `--compact-colorset`: repeating colorsets for BW/grayscale brushes. Uses a disk-backed analysis pass and adds offscreen filler notes. Remains opt-in.
+- `--subtitles N`: 1-based text subtitle track, rendered as plain white text in a black band inside the output dimensions. Requires at least 120 pixels of output height.
+- `--fps`: integer, decimal, fraction such as `24000/1001`, or `native` for the source's average frame rate.
+- Resolution supports up to 3840x2160. Larger canvases can require substantial RAM and VRAM even when note counts are low.
 - `--palette-cycle PATH`: reuse a custom palette and its repeated color entries. Exclude the background; do not combine with `--colors`.
 - `--background HEX`: color-mode background. Black and white/grayscale require black.
-- Color/grayscale defaults to `--brush-size 8`: overlapping squares, one colorset line per note. Requires Note Opacity 100% and Fade Length 0. Use `--brush-size 1` for pixel mode; palette repetitions only apply there.
+- Color/grayscale and compact BW default to `--brush-size 8`: overlapping squares, normally one colorset line per note. Requires Note Opacity 100% and Fade Length 0. Use `--brush-size 1` for pixel mode; custom palette repetitions only apply there.
+- `--experimental-cuda` supports brush sizes 2..64 for color/grayscale or compact BW, defaulting to 32. CPU supports the same brush sizes, plus pixel mode (`--brush-size 1`).
 
 Colorsets and Steam color ordering are automatic. Default pixel spacing is 0.01; `--span` overrides image width in grid units.
 

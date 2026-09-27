@@ -1,4 +1,6 @@
 #include "converter.h"
+#include "brush_optimizer.h"
+#include "subtitles.h"
 #include "cuda_brush.h"
 #include "archive.h"
 #include "process.h"
@@ -19,6 +21,7 @@
 #include <iomanip>
 #include <iostream>
 #include <locale>
+#include <map>
 #include <stdexcept>
 #include <thread>
 #include <unordered_map>
@@ -26,12 +29,6 @@
 
 namespace mp42rhm {
   namespace fs = std::filesystem;
-
-  int32_t frame_time(uint64_t frame, uint32_t fps) {
-    if (fps == 0 || fps > 1000 || frame > uint64_t(INT32_MAX) * fps / 1000)
-      throw std::runtime_error("Frame time exceeds RHM's signed 32-bit millisecond range");
-    return static_cast<int32_t>((frame * 1000 + fps / 2) / fps);
-  }
 
   uint32_t parse_color(const std::string& text) {
     const auto hex = !text.empty() && text.front() == '#' ? text.substr(1) : text;
@@ -89,20 +86,28 @@ namespace mp42rhm {
   }
 
   void validate(const Options& options) {
-    if (options.width < 2 || options.width > 1920 || options.height < 2 || options.height > 1080)
-      throw std::runtime_error("Sampling size must be between 2x2 and 1920x1080");
-    if (options.fps < 1 || options.fps > 60)
+    if (options.width < 2 || options.width > 3840 || options.height < 2 || options.height > 2160)
+      throw std::runtime_error("Sampling size must be between 2x2 and 3840x2160");
+    if (!options.fps.denominator || options.fps.value() < 1 || options.fps.value() > 60)
       throw std::runtime_error("FPS must be between 1 and 60");
     if (options.brush_size < 1 || options.brush_size > 64)
       throw std::runtime_error("Brush size must be between 1 and 64");
-    if (options.experimental_cuda && (options.mode == ColorMode::Bw || options.brush_size != 32))
-      throw std::runtime_error("--experimental-cuda requires color or grayscale mode with 32-pixel brushes");
-    if (options.brush_size > 1 && options.mode == ColorMode::Bw)
-      throw std::runtime_error("--brush-size requires color or grayscale mode");
+    if (options.experimental_cuda && (options.brush_size == 1 ||
+      (options.mode == ColorMode::Bw && !options.compact_colorset)))
+      throw std::runtime_error("--experimental-cuda requires 2..64-pixel color, grayscale, or compact BW brushes");
+    if (options.brush_size > 1 && options.mode == ColorMode::Bw && !options.compact_colorset)
+      throw std::runtime_error("BW brushes require --compact-colorset");
     if (options.threshold > 255 || options.max_notes == 0)
       throw std::runtime_error("Threshold must be 0..255 and max-notes must be positive");
-    if (options.color_count != 0 && (options.color_count < 2 || options.color_count > 256))
-      throw std::runtime_error("Colors must be between 2 and 256");
+    if (options.color_count != 0 && (options.color_count < 2 || options.color_count > (options.adaptive_palette ? 65536U : 256U)))
+      throw std::runtime_error("Colors must be 2..256, or 2..65536 with --adaptive-palette");
+    if (options.adaptive_palette && (options.mode != ColorMode::Color ||
+      options.brush_size == 1 || !options.palette_cycle.empty()))
+      throw std::runtime_error("--adaptive-palette requires color brushes without --palette-cycle");
+    if (options.compact_colorset && (options.mode == ColorMode::Color || options.brush_size == 1 || options.colorset.empty()))
+      throw std::runtime_error("--compact-colorset requires BW or grayscale brushes and a colorset output");
+    if (options.subtitle_track && options.height < 120)
+      throw std::runtime_error("Subtitles require an output height of at least 120 pixels");
     if (options.color_count && (options.mode == ColorMode::Bw || !options.palette_cycle.empty()))
       throw std::runtime_error("--colors requires grayscale or automatic color mode");
     if (!options.palette_cycle.empty() && options.mode != ColorMode::Color)
@@ -190,6 +195,8 @@ namespace mp42rhm {
     const uint32_t count = options.color_count ? options.color_count :
       options.mode == ColorMode::Grayscale ? 4 : 64;
 
+    if (options.mode == ColorMode::Bw)
+      return {{0xffffff}, {0}, {1}};
     if (options.mode == ColorMode::Grayscale) {
       for (uint32_t i = 1; i < count; ++i)
         palette.colors.push_back((i * 255 / (count - 1)) * 0x010101);
@@ -199,7 +206,7 @@ namespace mp42rhm {
       auto palette_filter = filter;
 
       if (options.seconds > 0)
-        arguments.insert(arguments.end() - 2, {L"-t", std::to_wstring(options.seconds + 1.0 / options.fps)});
+        arguments.insert(arguments.end() - 2, {L"-t", std::to_wstring(options.seconds + 1.0 / options.fps.value())});
       if (options.seconds > 0)
         palette_filter += L",trim=duration=" + std::to_wstring(options.seconds);
       palette_filter += L",palettegen=max_colors=" + std::to_wstring(count) +
@@ -243,6 +250,36 @@ namespace mp42rhm {
     if (result.ec != std::errc{})
       throw std::runtime_error("Cannot format note coordinate");
     return {buffer, result.ptr};
+  }
+
+  static std::vector<uint32_t> make_brush_cycle(const std::map<uint32_t, uint64_t>& frequency) {
+    double weight = 0;
+    std::vector<uint32_t> colors, quotas, cycle;
+    std::vector<int64_t> credit(frequency.size());
+    uint32_t length = 0;
+
+    for (const auto& entry : frequency)
+      weight += std::sqrt(double(entry.second));
+    for (const auto& [color, count] : frequency) {
+      const auto quota = std::max(1U, static_cast<uint32_t>(std::round(std::sqrt(double(count)) / weight * frequency.size() * 4)));
+
+      colors.push_back(color);
+      quotas.push_back(quota);
+      length += quota;
+    }
+    for (uint32_t slot = 0; slot < length; ++slot) {
+      size_t best = 0;
+
+      for (size_t i = 0; i < colors.size(); ++i) {
+        credit[i] += quotas[i];
+        if (credit[i] > credit[best])
+          best = i;
+      }
+      cycle.push_back(colors[best]);
+      credit[best] -= length;
+    }
+    std::rotate(cycle.begin(), std::find(cycle.begin(), cycle.end(), 0U), cycle.end());
+    return cycle;
   }
 
   static void write_sspm_v2(const fs::path& output_path, const fs::path& notes_path,
@@ -458,15 +495,25 @@ namespace mp42rhm {
     const PaletteCycle& palette, CudaBrushEncoder* cuda = nullptr) {
     const int32_t brush = static_cast<int32_t>(options.brush_size);
     auto colors = palette.colors;
-    const auto background = static_cast<uint8_t>(colors.size());
-    std::unordered_map<uint32_t, uint8_t> indices;
-    std::vector<uint8_t> canvas(size_t(options.width) * options.height), target(canvas.size()), indexed(canvas.size());
-    std::vector<BrushStroke> best, strokes;
+    std::unordered_map<uint32_t, uint16_t> indices;
+
+    if (options.adaptive_palette)
+      for (size_t i = 0; i < pixels.size(); i += 3) {
+        const uint32_t color = uint32_t(pixels[i]) << 16 | uint32_t(pixels[i + 1]) << 8 | pixels[i + 2];
+
+        if (color != options.background && indices.emplace(color, uint16_t{0}).second)
+          colors.push_back(color);
+      }
+    if (colors.size() > 65535)
+      throw std::runtime_error("Frame exceeds 65535 foreground colors");
+    const auto background = static_cast<uint16_t>(colors.size());
+    std::vector<uint16_t> canvas(size_t(options.width) * options.height), target(canvas.size()), indexed(canvas.size());
+    std::vector<BrushStroke> best, second, strokes;
     std::vector<std::vector<BrushStroke>> candidates;
 
     colors.push_back(options.background);
     for (size_t i = 0; i < colors.size(); ++i)
-      indices.emplace(colors[i], static_cast<uint8_t>(i));
+      indices[colors[i]] = static_cast<uint16_t>(i);
     for (size_t i = 0; i < indexed.size(); ++i) {
       const uint32_t color = (uint32_t(pixels[i * 3]) << 16) |
         (uint32_t(pixels[i * 3 + 1]) << 8) | pixels[i * 3 + 2];
@@ -489,7 +536,7 @@ namespace mp42rhm {
           target[size_t(y) * width + x] = indexed[pixel];
         }
       const auto paint = [&](int32_t x, int32_t y) {
-        const uint8_t color = target[size_t(y) * width + x];
+        const uint16_t color = target[size_t(y) * width + x];
 
         if (canvas[size_t(y) * width + x] == color)
           return;
@@ -539,8 +586,10 @@ namespace mp42rhm {
       }
       candidates.push_back(std::move(strokes));
     }
-    if (cuda)
-      return cuda->compact(candidates, pixels);
+    if (cuda) {
+      cuda->compact(candidates, pixels);
+      return reorder_brush_strokes(std::move(candidates[0]), pixels, options, candidates[1]);
+    }
     const size_t workers = std::max(1U, std::min(4U, std::thread::hardware_concurrency()));
 
     for (size_t begin = 0; begin < candidates.size(); begin += workers) {
@@ -553,11 +602,15 @@ namespace mp42rhm {
       for (auto& job : jobs) {
         auto candidate = job.get();
 
-        if (best.empty() || candidate.size() < best.size())
+        if (best.empty() || candidate.size() < best.size()) {
+          second = std::move(best);
           best = std::move(candidate);
+        } else if (second.empty() || candidate.size() < second.size())
+          second = std::move(candidate);
       }
     }
-    return best;
+    candidates.clear();
+    return reorder_brush_strokes(std::move(best), pixels, options, second);
   }
 
   Statistics convert(const Options& options) {
@@ -572,8 +625,8 @@ namespace mp42rhm {
     TemporaryDirectory temporary(fs::absolute(options.output).parent_path());
     const auto archive_path = temporary.path / options.output.filename();
     const bool sspm = options.format == Format::Sspm;
-    const bool cycle_mode = options.mode != ColorMode::Bw;
     const bool brush_mode = options.brush_size > 1;
+    const bool cycle_mode = options.mode != ColorMode::Bw || brush_mode;
     const bool binary = sspm || cycle_mode;
     const auto song_name = options.title.empty() ? options.input.stem().u8string() : options.title;
     const auto title = options.title.empty() ? song_name + " [video]" : options.title;
@@ -600,23 +653,30 @@ namespace mp42rhm {
       << json_string(options.difficulty_name.empty() ? "Video" : options.difficulty_name)
       << ",\"StarRating\":0,\"Notes\":[";
 
-    std::wstring filter = L"setpts=PTS-STARTPTS,fps=" + std::to_wstring(options.fps) +
+    const auto picture_height = options.height - subtitle_band_height(options);
+    const auto subtitle_filter = prepare_subtitles(options, temporary.path);
+    std::wstring filter = L"setpts=PTS-STARTPTS,fps=" + options.fps.text() +
       L":start_time=0,scale=" + std::to_wstring(options.width) + L":" +
-      std::to_wstring(options.height) + L":force_original_aspect_ratio=decrease:reset_sar=1:flags=" +
+      std::to_wstring(picture_height) + L":force_original_aspect_ratio=decrease:reset_sar=1:flags=" +
       (cycle_mode ? L"area" : L"lanczos") + L",format=" +
       (options.mode == ColorMode::Color ? L"bgra" : L"gray");
 
     if (options.invert)
       filter += L",negate";
-    if (options.mode == ColorMode::Grayscale)
+    if (options.mode == ColorMode::Grayscale || (options.mode == ColorMode::Bw && brush_mode))
       filter += L",format=bgra";
     const auto background_hex = color_hex(options.background);
 
-    filter += L",pad=" + std::to_wstring(options.width) + L":" + std::to_wstring(options.height) +
+    filter += L",pad=" + std::to_wstring(options.width) + L":" + std::to_wstring(picture_height) +
       L":(ow-iw)/2:(oh-ih)/2:" + (cycle_mode ? L"0x" + std::wstring(background_hex.begin() + 1, background_hex.end()) : L"black");
+    if (options.subtitle_track)
+      filter += L",pad=" + std::to_wstring(options.width) + L":" + std::to_wstring(options.height) +
+        L":0:0:black" + subtitle_filter;
+    if (options.mode == ColorMode::Bw && brush_mode)
+      filter += L",format=gray,lut=c0='if(gte(val," + std::to_wstring(options.threshold) + L"),255,0)',format=bgra";
 
     const auto palette = !options.palette_cycle.empty() ? read_palette(options.palette_cycle, options.background) :
-      cycle_mode ? generate_palette(options, filter) : PaletteCycle{};
+      cycle_mode && !options.adaptive_palette ? generate_palette(options, filter) : PaletteCycle{};
     std::ofstream colors;
 
     if (!options.colorset.empty()) {
@@ -631,7 +691,7 @@ namespace mp42rhm {
 
     auto arguments = input_arguments(options);
 
-    if (cycle_mode) {
+    if (cycle_mode && !options.adaptive_palette) {
       const auto palette_path = temporary.path / L"palette.ppm";
       std::ofstream palette_image(palette_path, std::ios::binary);
 
@@ -650,7 +710,12 @@ namespace mp42rhm {
     }
     if (options.seconds > 0)
       arguments.insert(arguments.end(), {L"-t", std::to_wstring(options.seconds)});
-    if (cycle_mode)
+    if (options.adaptive_palette) {
+      const auto count = options.color_count ? options.color_count : 64;
+
+      filter += L",format=rgb24,elbg=codebook_length=" + std::to_wstring(count - 1) + L":nb_steps=1:seed=1";
+      arguments.insert(arguments.end(), {L"-map", L"0:v:0", L"-vf", filter});
+    } else if (cycle_mode)
       arguments.insert(arguments.end(), {L"-filter_complex", L"[0:v]" + filter + L"[video];[video][1:v]paletteuse=dither=none[out]", L"-map", L"[out]"});
     else
       arguments.insert(arguments.end(), {L"-map", L"0:v:0", L"-vf", filter});
@@ -662,7 +727,7 @@ namespace mp42rhm {
     std::vector<uint8_t> previous_pixels;
     std::vector<BrushStroke> previous_strokes;
     std::vector<std::string> x_coordinates(options.width);
-    std::vector<std::string> positions(size_t(options.width) * options.height);
+    std::vector<std::string> positions(brush_mode ? 0 : size_t(options.width) * options.height);
     const double pitch = options.span == 0 ? 0.01 : options.span / options.width;
     Statistics statistics;
     uint32_t last_note = 0;
@@ -671,11 +736,11 @@ namespace mp42rhm {
     std::vector<uint32_t> frame_counts;
     auto last_progress = std::chrono::steady_clock::now();
 
-    frame_json.reserve(size_t(options.width) * options.height * 64);
+    frame_json.reserve(size_t(options.width) * options.height * (binary ? 14 : 64));
 
     for (uint32_t x = 0; x < options.width; ++x)
       x_coordinates[x] = coordinate(1 + (x + 0.5 - options.width / 2.0) * pitch);
-    for (uint32_t y = 0; y < options.height; ++y) {
+    for (uint32_t y = 0; !brush_mode && y < options.height; ++y) {
       const auto position_y = coordinate(1 + (y + 0.5 - options.height / 2.0) * pitch);
 
       for (uint32_t x = 0; x < options.width; ++x) {
@@ -730,7 +795,7 @@ namespace mp42rhm {
       return received != 0;
     };
 
-    while (true) {
+    const auto next_frame = [&] {
       if (cuda) {
         while (jobs.size() < cuda->parallel_frames() && !decode_finished) {
           if (!read_frame()) {
@@ -746,10 +811,65 @@ namespace mp42rhm {
           jobs.push_back(last_job);
         }
         if (jobs.empty())
-          break;
+          return false;
         previous_strokes = jobs.front().get();
         jobs.pop_front();
-      } else if (!read_frame())
+      } else {
+        if (!read_frame())
+          return false;
+        if (brush_mode && pixels != previous_pixels) {
+          previous_strokes = paint_frame(pixels, options, palette);
+          previous_pixels = pixels;
+        }
+      }
+      return true;
+    };
+    std::vector<uint32_t> compact_cycle;
+    std::ifstream staged;
+    uint64_t staged_frames = 0;
+
+    if (options.compact_colorset) {
+      const auto path = temporary.path / L"brushes.bin";
+      std::ofstream staging(path, std::ios::binary);
+      std::map<uint32_t, uint64_t> frequency{{0, 1}};
+
+      staging.exceptions(std::ios::badbit | std::ios::failbit);
+      std::cerr << "Analyzing brush colors...\n";
+      while (next_frame()) {
+        const auto count = static_cast<uint32_t>(previous_strokes.size());
+
+        staging.write(reinterpret_cast<const char*>(&count), sizeof(count));
+        staging.write(reinterpret_cast<const char*>(previous_strokes.data()), size_t(count) * sizeof(BrushStroke));
+        for (const auto& stroke : previous_strokes)
+          ++frequency[stroke.color];
+        ++staged_frames;
+        const auto now = std::chrono::steady_clock::now();
+
+        if (now - last_progress >= std::chrono::seconds(5)) {
+          std::cerr << "Analyzed " << staged_frames << " frames\n";
+          last_progress = now;
+        }
+      }
+      decoder.finish();
+      staging.close();
+      compact_cycle = make_brush_cycle(frequency);
+      for (auto color : compact_cycle)
+        colors << color_hex(color) << '\n';
+      staged.open(path, std::ios::binary);
+      staged.exceptions(std::ios::badbit | std::ios::failbit);
+    }
+
+    while (true) {
+      if (options.compact_colorset) {
+        if (statistics.frames == staged_frames)
+          break;
+        uint32_t count;
+
+        staged.read(reinterpret_cast<char*>(&count), sizeof(count));
+        previous_strokes.resize(count);
+        staged.read(reinterpret_cast<char*>(previous_strokes.data()), size_t(count) * sizeof(BrushStroke));
+        previous_strokes = cycle_brush_strokes(std::move(previous_strokes), options, compact_cycle);
+      } else if (!next_frame())
         break;
 
       // Hit times mark frame ends because notes approach before they are hit
@@ -775,13 +895,12 @@ namespace mp42rhm {
 
       frame_json.clear();
       if (brush_mode) {
-        if (!cuda && pixels != previous_pixels) {
-          previous_strokes = paint_frame(pixels, options, palette);
-          previous_pixels = pixels;
-        }
-
         // Steam draws simultaneous notes in reverse index order
         for (auto stroke = previous_strokes.rbegin(); stroke != previous_strokes.rend(); ++stroke) {
+          if (stroke->x == INT32_MIN) {
+            emit(positions[filler_pixel], true);
+            continue;
+          }
           const float x = static_cast<float>(1 + (stroke->x + options.brush_size / 2.0 - options.width / 2.0) * pitch);
           const float y = static_cast<float>(1 + (stroke->y + options.brush_size / 2.0 - options.height / 2.0) * pitch);
           std::string position;
@@ -791,7 +910,8 @@ namespace mp42rhm {
           position.append(reinterpret_cast<const char*>(&x), sizeof(x));
           position.append(reinterpret_cast<const char*>(&y), sizeof(y));
           emit(position);
-          colors << color_hex(stroke->color) << '\n';
+          if (!options.compact_colorset)
+            colors << color_hex(stroke->color) << '\n';
         }
       } else if (cycle_mode) {
         for (auto& bucket : buckets)
@@ -844,7 +964,8 @@ namespace mp42rhm {
         last_progress = now;
       }
     }
-    decoder.finish();
+    if (!options.compact_colorset)
+      decoder.finish();
     if (statistics.frames == 0)
       throw std::runtime_error("The requested interval contains no video frames");
     if (statistics.notes == 0)
