@@ -48,7 +48,7 @@ Resolution supports up to 3840x2160. `--fps` accepts decimals, fractions such as
 3. Frames become simultaneous square notes. Brush mode compares 16 painting orders, repositions squares, then combines and reorders strokes from the best two results to remove more notes. Pixels remain exact after scaling and palette conversion; the extra search takes longer to encode.
 4. Note order is compensated for Steam's sorting and reverse draw order. Notes and MP3 audio are packaged as SSPM v2 or RHM.
 
-Brush colorsets normally contain one line per note. Compact mode repeats a short sequence and schedules strokes around it without changing pixels. `--colors` controls palette size, not colorset length.
+Colorsets use bare `RRGGBB` lines (7 bytes per entry). Brush colorsets normally contain one line per note. Compact mode repeats a short sequence and schedules strokes around it without changing pixels. `--colors` controls palette size, not colorset length.
 
 Raster scans track only the active brush edge, and stroke analysis uses SIMD. Adaptive palettes up to 256 colors use indexed FFmpeg frames to reduce pipe traffic. These optimizations are automatic and preserve the generated notes and colors.
 

@@ -40,10 +40,10 @@ namespace mp42rhm {
 
   static std::string color_hex(uint32_t color) {
     static constexpr char HEX[] = "0123456789abcdef";
-    std::string result = "#000000";
+    std::string result = "000000";
 
     for (size_t i = 0; i < 6; ++i)
-      result[6 - i] = HEX[(color >> (i * 4)) & 15];
+      result[5 - i] = HEX[(color >> (i * 4)) & 15];
     return result;
   }
 
@@ -683,7 +683,7 @@ namespace mp42rhm {
     const auto background_hex = color_hex(options.background);
 
     filter += L",pad=" + std::to_wstring(options.width) + L":" + std::to_wstring(picture_height) +
-      L":(ow-iw)/2:(oh-ih)/2:" + (cycle_mode ? L"0x" + std::wstring(background_hex.begin() + 1, background_hex.end()) : L"black");
+      L":(ow-iw)/2:(oh-ih)/2:" + (cycle_mode ? L"0x" + std::wstring(background_hex.begin(), background_hex.end()) : L"black");
     if (options.subtitle_track)
       filter += L",pad=" + std::to_wstring(options.width) + L":" + std::to_wstring(options.height) +
         L":0:0:black" + subtitle_filter;
@@ -701,7 +701,7 @@ namespace mp42rhm {
         for (size_t slot : palette.slots)
           colors << color_hex(palette.colors[slot]) << '\n';
       if (!cycle_mode)
-        colors << "#ffffff\n";
+        colors << "ffffff\n";
     }
 
     auto arguments = input_arguments(options);

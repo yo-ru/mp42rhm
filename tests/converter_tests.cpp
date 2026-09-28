@@ -188,8 +188,10 @@ static std::vector<uint32_t> render_brush_map(const mp42rhm::Options& options, s
   const double pitch = options.span ? options.span / options.width : .01;
   std::vector<uint32_t> canvas(size_t(width) * height * frames, options.background);
 
-  while (std::getline(file, line))
+  while (std::getline(file, line)) {
+    require(line.size() == 6, "Colorset entries must be bare RGB hex");
     colors.push_back(mp42rhm::parse_color(line));
+  }
   require(!colors.empty(), "Empty brush colorset");
   for (size_t i = 0; i < order.size(); ++i)
     order[i] = uint64_t(map.map.notes[i].time) << 32 | i;
@@ -418,7 +420,7 @@ static void test_new_modes(const fs::path& directory, const fs::path& executable
           }
     }
     require(stats.frames == 3 && fs::file_size(options.colorset) < 512, "Compact colorset or frame count");
-    require(stats.filler_notes > 0 && stats.notes % (fs::file_size(options.colorset) / 8) == 0,
+    require(stats.filler_notes > 0 && stats.notes % (fs::file_size(options.colorset) / 7) == 0,
       "Compact colorset phase or filler accounting");
     const auto exact_budget = stats.notes;
 
@@ -691,7 +693,7 @@ int main(int argc, char** argv) {
     const std::string exported_cycle((std::istreambuf_iterator<char>(cycle_colors)), {});
 
     cycle_colors.close();
-    require(exported_cycle == cycle_text, "Palette cycle changed or expanded per note");
+    require(exported_cycle == "ff0000\nffffff\nffffff\n00ff00\n0000ff\n", "Palette cycle changed or expanded per note");
     require(cycle_stats.frames == 3 && cycle_stats.duration_ms == 50 && cycle_stats.notes == 10 &&
       cycle_stats.filler_notes == 5 && cycle_map.map.notes.size() == 10, "Palette padding/frame counts");
 
@@ -810,8 +812,10 @@ int main(int argc, char** argv) {
         std::vector<uint32_t> rgb;
         std::string line;
 
-        while (std::getline(colors, line))
+        while (std::getline(colors, line)) {
+          require(line.size() == 6, "Colorset entries must be bare RGB hex");
           rgb.push_back(mp42rhm::parse_color(line));
+        }
         require(!rgb.empty() && rgb.size() <= 31, "Generated colorset is not compact");
         if (mode == mp42rhm::ColorMode::Bw)
           require(rgb == std::vector<uint32_t>{0xffffff}, "BW colorset is not white");
@@ -1066,9 +1070,9 @@ int main(int argc, char** argv) {
     require(color_stats.notes - color_stats.filler_notes == 5 && color.map.notes.size() == color_stats.notes,
       "Automatic color mode omitted visible pixels");
     require(color.audio.empty(), "no-audio ignored");
-    require(palette.size() == 4 * 8 && palette.find("#ffffff\n") != std::string::npos &&
-      palette.find("#ff0000\n") != std::string::npos && palette.find("#00ff00\n") != std::string::npos &&
-      palette.find("#0000ff\n") != std::string::npos, "Generated palette lost source colors");
+    require(palette.size() == 4 * 7 && palette.find("ffffff\n") != std::string::npos &&
+      palette.find("ff0000\n") != std::string::npos && palette.find("00ff00\n") != std::string::npos &&
+      palette.find("0000ff\n") != std::string::npos, "Generated palette lost source colors");
 
     options.format = mp42rhm::Format::Sspm;
     options.output = directory / L"color.sspm";
