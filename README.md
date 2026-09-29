@@ -7,7 +7,7 @@
 
 ## Introduction
 
-mp42rhm converts videos into note maps for Steam Rhythia. Written in C++17 for Windows, it exports SSPM v2 or RHM with embedded audio and a matching colorset.
+mp42rhm converts videos into beatmaps for Steam Rhythia. Written in C++17 for Windows, it exports SSPM v2 or RHM with embedded audio and a matching colorset.
 
 ## Getting Started
 
@@ -40,7 +40,7 @@ Run `--help` for common options or `--help-all` for every option. [AGENTS.md](AG
 - Text subtitles in a black band with `--subtitles N` (1-based track number).
 - Experimental NVIDIA acceleration with `--experimental-cuda`.
 
-CPU encoding is the default. CUDA requires an NVIDIA driver and CUDA 12/13 NVRTC with its matching builtins DLL beside the executable or on PATH. It supports color, grayscale, and compact BW brushes.
+Defaults to CPU encoding. CUDA requires an NVIDIA driver and CUDA 12/13 NVRTC with its matching builtins DLL beside the executable or on PATH. It supports color, grayscale, and compact BW brushes.
 
 Brushes support sizes 2..64, defaulting to 8 on CPU and 32 on CUDA. Use `--brush-size 1` for CPU pixel mode. Ordinary BW uses pixel mode by default.
 
