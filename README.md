@@ -1,4 +1,4 @@
-<img src=".github/banner.png" alt="mp42rhm - Video maps for Steam Rhythia. Up to 4K, adaptive color, CPU and CUDA encoding, SSPM and RHM output." width="100%">
+<img src=".github/banner.svg" alt="mp42rhm - Video maps for Steam Rhythia. Up to 4K, adaptive color, CPU and CUDA encoding, SSPM and RHM output." width="100%">
 
 [![Windows](https://img.shields.io/badge/platform-Windows-0078D4)](#getting-started)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C)](CMakeLists.txt)
