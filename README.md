@@ -3,6 +3,7 @@
 [![Windows](https://img.shields.io/badge/platform-Windows-0078D4)](#getting-started)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C)](CMakeLists.txt)
 [![CUDA: experimental](https://img.shields.io/badge/CUDA-experimental-76B900)](#features)
+[![License: MIT](https://img.shields.io/badge/license-MIT-blue)](LICENSE)
 
 ## Introduction
 
@@ -55,3 +56,9 @@ Colorsets use bare `RRGGBB` lines, 7 bytes per entry. Brush exports normally nee
 ## Playback
 
 Import the map and colorset, then apply the printed Note Scale, AR, SD, and background RGB. Use solid square notes, 1x speed, and Visualize (Auto). Brush maps require Note Opacity 100% and Fade Length 0.
+
+## License
+
+MIT. See [LICENSE](LICENSE) and [third-party notices](licenses/).
+
+The Rhythia name and logo, property of [CAPO GAMES S.R.L.](https://www.capo.games/), are excluded from this license.
