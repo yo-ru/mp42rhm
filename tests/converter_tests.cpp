@@ -793,7 +793,7 @@ int main(int argc, char** argv) {
             uint32_t(pixels[reference + 1]) << 8 | pixels[reference + 2];
 
           require(imported_pixels[frame * 64 + y * 8 + x] == rgb,
-            "Steam sort broke the compensated changing-image fixture");
+            "Steam Rhythia sort broke the compensated changing-image fixture");
         }
     for (const auto format : {mp42rhm::Format::Sspm, mp42rhm::Format::Rhm}) {
       for (const auto mode : {mp42rhm::ColorMode::Bw, mp42rhm::ColorMode::Grayscale, mp42rhm::ColorMode::Color}) {
@@ -846,7 +846,7 @@ int main(int argc, char** argv) {
           for (size_t i = 0; i < image.size(); ++i)
             require(image[i] == (uint32_t(expanded_pixels[i * 3]) << 16 |
               uint32_t(expanded_pixels[i * 3 + 1]) << 8 | expanded_pixels[i * 3 + 2]),
-              "Automatic palette colors scrambled after Steam sorting");
+              "Automatic palette colors scrambled after sorting");
         } else if (mode == mp42rhm::ColorMode::Grayscale) {
           require(std::find(image.begin(), image.end(), 0x555555) != image.end() ||
             std::find(image.begin(), image.end(), 0xaaaaaa) != image.end(), "Grayscale lost intermediate tones");

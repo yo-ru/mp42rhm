@@ -914,7 +914,7 @@ namespace mp42rhm {
         if (sspm && statistics.notes == UINT32_MAX)
           throw std::runtime_error("SSPM cannot store more than 4294967295 notes");
         if (cycle_mode && statistics.notes == INT32_MAX)
-          throw std::runtime_error("Steam color compensation exceeds the signed array-index range");
+          throw std::runtime_error("Steam Rhythia color compensation exceeds the signed array-index range");
         frame_json.append(prefix, !binary && statistics.notes == 0 ? 1 : 0);
         frame_json.append(position);
         ++statistics.notes;
@@ -926,7 +926,7 @@ namespace mp42rhm {
 
       frame_json.clear();
       if (brush_mode) {
-        // Steam draws simultaneous notes in reverse index order
+        // Rhythia draws simultaneous notes in reverse index order
         for (auto stroke = previous_strokes.rbegin(); stroke != previous_strokes.rend(); ++stroke) {
           if (stroke->x == INT32_MIN) {
             emit(positions[filler_pixel], true);
