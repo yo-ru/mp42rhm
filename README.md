@@ -60,7 +60,7 @@ Add `--experimental-cuda` to a color, grayscale, or compact BW export. Alternati
 1. FFmpeg decodes and scales frames, preserving aspect ratio with padding.
 2. Frames are thresholded for BW or quantized to a grayscale or color palette without dithering.
 3. Pixel mode places one note per visible pixel. Brush mode paints with overlapping squares, comparing 16 painting orders and optimizing the best two results to remove notes while preserving the quantized pixels.
-4. Note order is compensated for Rhythia's sorting and reverse draw order. Notes are packaged with MP3 audio and a matching colorset.
+4. Note order is compensated for Rhythia's sorting and reverse draw order. Maps are packaged with MP3 audio and a matching colorset.
 
 Colorsets use bare `RRGGBB` lines, 7 bytes per entry. Brush exports normally need one entry per note; compact mode reuses a short sequence. `--colors` controls palette size, not colorset length.
 
