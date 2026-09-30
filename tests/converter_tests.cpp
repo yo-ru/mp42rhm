@@ -185,7 +185,7 @@ static std::vector<uint32_t> render_brush_map(const mp42rhm::Options& options, s
   std::string line;
   const int margin = options.brush_size * 2, width = options.width + margin * 2;
   const int height = options.height + margin * 2;
-  const double pitch = options.span ? options.span / options.width : .01;
+  const double pitch = mp42rhm::note_scale(options) / options.brush_size;
   std::vector<uint32_t> canvas(size_t(width) * height * frames, options.background);
 
   while (std::getline(file, line)) {
@@ -578,6 +578,9 @@ int main(int argc, char** argv) {
     require(options.fps.numerator == 12 && options.fps.denominator == 1 && options.max_notes == 100000000,
       "Full-video defaults changed");
     const auto executable = fs::absolute(argv[0]).parent_path() / L"mp42rhm.exe";
+    mp42rhm::Process version({executable.wstring(), L"--version"});
+
+    require(version.finish().find("mp42rhm ") == 0, "Missing CLI version");
     const auto cli_video = directory / L"cli.mp4";
     mp42rhm::Process cli_fixture({L"ffmpeg.exe", L"-hide_banner", L"-loglevel", L"error", L"-nostdin",
       L"-f", L"lavfi", L"-i", L"color=c=white:s=16x16:r=24:d=0.25",
@@ -591,16 +594,72 @@ int main(int argc, char** argv) {
       if (std::wstring(mode) != L"bw")
         arguments.insert(arguments.end(), {L"--mode", mode});
       mp42rhm::Process command(arguments);
-      const auto output = command.finish();
+      auto output = command.finish();
+
+      output.erase(std::remove(output.begin(), output.end(), '\r'), output.end());
       const auto generated = read_sspm_v2(base.wstring() + L".sspm");
       const auto scale = std::wstring(mode) == L"bw" ? "Note Scale: 0.01" : "Note Scale: 0.08";
 
       require(output.find("Exported 3 frames") != std::string::npos && output.find(scale) != std::string::npos,
         "CLI frame rate or automatic brush default changed");
       require(!generated.map.notes.empty() && fs::exists(base.wstring() + L"-colorset.txt"), "Missing default CLI outputs");
+      std::ifstream settings(base.wstring() + L"-settings.txt", std::ios::binary);
+      const std::string saved((std::istreambuf_iterator<char>(settings)), {});
+
+      require(saved == output && saved.find("Map: ") != std::string::npos &&
+        saved.find("B)") != std::string::npos && saved.find("Time: ") != std::string::npos &&
+        saved.find("FOV: 30") != std::string::npos, "Playback settings or export summary missing");
       for (const auto& note : generated.map.notes)
         require(note.time == 83 || note.time == 167 || note.time == 250, "Default CLI timing");
     }
+    for (const auto format : {L"sspm", L"rhm"})
+      for (const uint32_t brush : {1U, 8U})
+        for (const auto span : {L"0.33", L"0.001"}) {
+          const auto base = directory / (std::wstring(L"scale-") + format + L"-" +
+            std::to_wstring(brush) + L"-" + span);
+          const auto output_path = base.wstring() + L"." + format;
+          mp42rhm::Process command({executable.wstring(), cli_video.wstring(), output_path,
+            L"--format", format, L"--mode", L"grayscale", L"--width", L"16", L"--height", L"16",
+            L"--brush-size", std::to_wstring(brush), L"--span", span});
+          auto output = command.finish();
+
+          output.erase(std::remove(output.begin(), output.end(), '\r'), output.end());
+          const double scale = std::wstring(span) == L"0.001" ? .01 : brush == 1 ? .02 : .17;
+          const auto map = std::wstring(format) == L"sspm" ? read_sspm_v2(output_path) : read_map(output_path);
+
+          require(output.find("Note Scale: " + std::to_string(scale).substr(0, 4) + "\n") != std::string::npos,
+            "CLI note scale is not playable");
+          require(!map.map.notes.empty(), "Empty scale regression map");
+          for (const auto& note : map.map.notes) {
+            if (note.x == 100 && note.y == 100)
+              continue;
+            const double x = (note.x - 1) * brush / scale + 8 - brush / 2.0;
+            const double y = (note.y - 1) * brush / scale + 8 - brush / 2.0;
+
+            require(std::abs(x - std::round(x)) < .001 && std::abs(y - std::round(y)) < .001,
+              "Coordinates disagree with the playable note scale");
+          }
+        }
+    const auto blocked = directory / L"cli-settings-exist";
+    const auto blocked_settings = blocked.wstring() + L"-settings.txt";
+
+    std::ofstream(blocked_settings) << "keep";
+    mp42rhm::Process blocked_command({executable.wstring(), cli_video.wstring(), blocked.wstring()});
+
+    must_fail([&] { blocked_command.finish(); });
+    std::ifstream original(blocked_settings);
+    std::string contents;
+
+    original >> contents;
+    require(contents == "keep" && !fs::exists(blocked.wstring() + L".sspm"), "Existing settings overwritten");
+    original.close();
+    const auto collision = directory / L"cli-settings-collision";
+    mp42rhm::Process collision_command({executable.wstring(), cli_video.wstring(), collision.wstring(),
+      L"--colorset", collision.wstring() + L"-SETTINGS.TXT"});
+
+    must_fail([&] { collision_command.finish(); });
+    require(!fs::exists(collision.wstring() + L".sspm") &&
+      !fs::exists(collision.wstring() + L"-SETTINGS.TXT"), "Conflicting settings output published");
     const auto overridden = directory / L"cli-overridden.rhm";
     mp42rhm::Process override_command({executable.wstring(), cli_video.wstring(), overridden.wstring(),
       L"--mode", L"color", L"--brush-size", L"1", L"--colors", L"4", L"--fps", L"24",
@@ -793,7 +852,7 @@ int main(int argc, char** argv) {
             uint32_t(pixels[reference + 1]) << 8 | pixels[reference + 2];
 
           require(imported_pixels[frame * 64 + y * 8 + x] == rgb,
-            "Steam Rhythia sort broke the compensated changing-image fixture");
+            "Rhythia sort broke the compensated changing-image fixture");
         }
     for (const auto format : {mp42rhm::Format::Sspm, mp42rhm::Format::Rhm}) {
       for (const auto mode : {mp42rhm::ColorMode::Bw, mp42rhm::ColorMode::Grayscale, mp42rhm::ColorMode::Color}) {

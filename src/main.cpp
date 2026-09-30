@@ -1,14 +1,18 @@
 #include "converter.h"
 #include "process.h"
+#include "version.h"
 
 #include <Windows.h>
+#include <chrono>
 #include <cmath>
+#include <iomanip>
 #include <iostream>
+#include <sstream>
 #include <stdexcept>
 
 static void usage(bool all) {
   std::cout <<
-    "Video maps for Steam Rhythia\n"
+    "Video beatmaps for Rhythia\n"
     "Usage: mp42rhm input.mp4 output [options]\n\n"
     "  --mode MODE             bw, grayscale, color (bw)\n"
     "  --width N --height N    Resolution (160x90)\n"
@@ -31,7 +35,7 @@ static void usage(bool all) {
     "  --adaptive-palette      Per-frame color palette, up to 65536 colors\n"
     "  --compact-colorset      Repeating BW/grayscale brush colorset\n"
     "  --subtitles N           Text subtitle track in a black band (1-based)\n"
-    "  --span N                Image width (default: width * 0.01)\n"
+    "  --span N                Image width in grid units (rounded)\n"
     "  --palette-cycle PATH    Custom color palette\n"
     "  --threshold N           Black/white threshold (128)\n"
     "  --invert                Invert brightness\n"
@@ -40,7 +44,8 @@ static void usage(bool all) {
     "  --no-audio              Exclude audio\n"
     "  --colorset PATH         Colorset output (<output>-colorset.txt)\n"
     "  --ffmpeg PATH           FFmpeg executable\n"
-    "  --ffprobe PATH          ffprobe executable\n";
+    "  --ffprobe PATH          ffprobe executable\n"
+    "  --version               Print version\n";
 }
 
 static uint64_t integer(const std::wstring& value, uint64_t maximum) {
@@ -78,8 +83,26 @@ static std::string utf8(const std::wstring& value) {
   return result;
 }
 
+static std::string file_size_label(const std::filesystem::path& path) {
+  static constexpr const char* UNITS[] = {"B", "KiB", "MiB", "GiB", "TiB"};
+  double size = static_cast<double>(std::filesystem::file_size(path));
+  size_t unit = 0;
+  std::ostringstream label;
+
+  while (size >= 1024 && unit < 4) {
+    size /= 1024;
+    ++unit;
+  }
+  label << std::fixed << std::setprecision(unit ? 2 : 0) << size << ' ' << UNITS[unit];
+  return label.str();
+}
+
 int wmain(int argc, wchar_t** argv) {
   try {
+    if (argc == 2 && std::wstring(argv[1]) == L"--version") {
+      std::cout << "mp42rhm " << mp42rhm::VERSION << '\n';
+      return 0;
+    }
     if (argc == 2 && (std::wstring(argv[1]) == L"--help" || std::wstring(argv[1]) == L"--help-all")) {
       usage(std::wstring(argv[1]) == L"--help-all");
       return 0;
@@ -210,28 +233,60 @@ int wmain(int argc, wchar_t** argv) {
       options.fps = mp42rhm::parse_frame_rate(probe.finish());
     }
     mp42rhm::validate(options);
+    const auto settings_path = options.output.parent_path() / (options.output.stem().wstring() + L"-settings.txt");
+
+    if (std::filesystem::exists(settings_path) || _wcsicmp(
+      std::filesystem::absolute(settings_path).lexically_normal().c_str(),
+      std::filesystem::absolute(options.colorset).lexically_normal().c_str()) == 0)
+      throw std::runtime_error("Settings must name a separate new file: " + utf8(settings_path.wstring()));
 
     std::cerr << "Converting " << options.width << 'x' << options.height << " at " << options.fps.value() << " fps...\n";
 
+    const auto started = std::chrono::steady_clock::now();
     const auto result = mp42rhm::convert(options);
-    const double note_scale = (options.span == 0 ? 0.01 : options.span / options.width) * options.brush_size;
+    const double elapsed = std::chrono::duration<double>(std::chrono::steady_clock::now() - started).count();
     // Round AR up to avoid overlapping quantized video frames
     const double approach_rate = std::ceil(1000.0 / std::floor(1000.0 / options.fps.value())) / 100;
+    std::ostringstream summary;
 
-    std::cout << "Exported " << result.frames << " frames, " << result.notes
-      << " notes (peak " << result.peak_frame_notes << "/frame).\n\n"
-      << "Steam Rhythia settings:\n"
-      << "  Note Scale: " << note_scale << '\n';
+    summary << "Exported " << result.frames << " frames, " << result.notes
+      << " notes (peak " << result.peak_frame_notes << "/frame).\n"
+      << "Time: " << std::fixed << std::setprecision(1) << elapsed << " s\n"
+      << "Map: " << utf8(std::filesystem::absolute(options.output).wstring())
+      << " (" << file_size_label(options.output) << ")\n"
+      << "Colorset: " << utf8(std::filesystem::absolute(options.colorset).wstring())
+      << " (" << file_size_label(options.colorset) << ")\n"
+      << "Settings: " << utf8(std::filesystem::absolute(settings_path).wstring()) << "\n\n"
+      << "Rhythia settings:\n"
+      << "  Note Scale: " << std::setprecision(2) << mp42rhm::note_scale(options) << '\n';
     if (options.brush_size > 1)
-      std::cout << "  Note Opacity: 100%\n  Fade Length: 0\n";
-    std::cout << "  AR: " << approach_rate << '\n'
+      summary << "  Note Opacity: 100%\n  Fade Length: 0\n";
+    summary << "  AR: " << approach_rate << '\n'
       << "  SD: 0.01\n"
+      << "  FOV: 30 (starting point)\n"
       << "  Background (R, G, B): " << ((options.background >> 16) & 255) << ", "
       << ((options.background >> 8) & 255) << ", " << (options.background & 255) << '\n'
       << "  Speed: 1x\n"
       << "  Notes: Solid squares\n"
       << "  Playback: Visualize (Auto)\n"
-      << "  Colorset: " << utf8(options.colorset.wstring()) << '\n';
+      << "\nmp42rhm " << mp42rhm::VERSION << '\n';
+
+    const auto text = summary.str();
+    const HANDLE settings = CreateFileW(settings_path.c_str(), GENERIC_WRITE, 0, nullptr,
+      CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+    std::cout << text;
+    if (settings == INVALID_HANDLE_VALUE)
+      throw std::runtime_error("Map and colorset exported, but settings file could not be created");
+
+    DWORD written = 0;
+    const BOOL saved = WriteFile(settings, text.data(), static_cast<DWORD>(text.size()), &written, nullptr);
+
+    CloseHandle(settings);
+    if (!saved || written != text.size()) {
+      DeleteFileW(settings_path.c_str());
+      throw std::runtime_error("Map and colorset exported, but settings file could not be saved");
+    }
     return 0;
   } catch (const std::exception& error) {
     std::cerr << "Error: " << error.what() << '\n';

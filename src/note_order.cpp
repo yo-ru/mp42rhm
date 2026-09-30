@@ -108,7 +108,7 @@ namespace mp42rhm {
     const uint64_t count = std::accumulate(frame_counts.begin(), frame_counts.end(), uint64_t{0});
 
     if (count > INT32_MAX)
-      throw std::runtime_error("Steam Rhythia color compensation exceeds the signed array-index range");
+      throw std::runtime_error("Rhythia color compensation exceeds the signed array-index range");
     if (std::filesystem::file_size(input_path) != count * 14)
       throw std::runtime_error("Unexpected SSPM v2 note staging size");
 

@@ -1,4 +1,4 @@
-<img src=".github/banner.svg" alt="mp42rhm - Video maps for Steam Rhythia. Up to 4K, adaptive color, CPU and CUDA encoding, SSPM and RHM output." width="100%">
+<img src=".github/banner.svg" alt="mp42rhm - Video maps for Rhythia. Up to 4K, adaptive color, CPU and CUDA encoding, SSPM and RHM output." width="100%">
 
 [![Windows](https://img.shields.io/badge/platform-Windows-0078D4)](#getting-started)
 [![C++17](https://img.shields.io/badge/C%2B%2B-17-00599C)](CMakeLists.txt)
@@ -7,29 +7,30 @@
 
 ## Introduction
 
-mp42rhm converts videos into beatmaps for Steam Rhythia. Written in C++17 for Windows, it exports SSPM v2 or RHM with embedded audio and a matching colorset.
+mp42rhm converts videos into beatmaps for Rhythia. Written in C++17 for Windows, it exports SSPMv2 or RHM with embedded audio and a matching colorset.
 
 ## Getting Started
 
-Requires Visual Studio 2022 C++ tools, CMake 3.24+, Git, and FFmpeg/ffprobe on PATH.
+Download and extract the Windows x64 ZIP from [Releases](https://github.com/yo-ru/mp42rhm/releases), or [build from source](#building). The ZIP includes the C++ runtime; FFmpeg must be installed separately.
 
 ```powershell
-cmake -S . -B build -A x64
-cmake --build build --config Release
-ctest --test-dir build -C Release --output-on-failure
+winget install --id Gyan.FFmpeg -e
 ```
+
+Reopen PowerShell in the extracted folder. Start with a short preview, then try a larger color export:
 
 ```powershell
-.\build\Release\mp42rhm.exe video.mp4 bw
-.\build\Release\mp42rhm.exe video.mp4 gray --mode grayscale
-.\build\Release\mp42rhm.exe video.mp4 color --adaptive-palette --colors 256
+.\mp42rhm.exe "video.mp4" preview --seconds 5
+.\mp42rhm.exe "video.mp4" color --adaptive-palette --colors 256 --width 640 --height 360 --fps 12 --brush-size 32 --span 3.3
 ```
 
-Each command writes `<output>.sspm` and `<output>-colorset.txt`. Use `--format rhm` for RHM or `--seconds 5` for a preview.
+Exports write `<output>.sspm`, `<output>-colorset.txt`, and `<output>-settings.txt`. Existing files are never overwritten. Use `--format rhm` for RHM or `--mode grayscale` for grayscale.
 
-Defaults: black and white, 160x90, 12 FPS, 100 million notes. Set `--width`, `--height`, `--fps`, and `--max-notes` to change them.
+Defaults are a small starting point: black and white, 160x90, 12 FPS, 100 million notes. Set `--width`, `--height`, `--fps`, and `--max-notes` to change them.
 
-Run `--help` for common options or `--help-all` for every option. [AGENTS.md](AGENTS.md) covers exports through an AI assistant.
+Run `--help` for common options, `--help-all` for every option, or `--version` when reporting an issue. [AGENTS.md](AGENTS.md) covers using mp42rhm through an AI assistant.
+
+Tested with [Gyan FFmpeg 9.0.1 full](https://www.gyan.dev/ffmpeg/builds/). Both `ffmpeg` and `ffprobe` must be on PATH, or supplied with `--ffmpeg` and `--ffprobe`.
 
 ## Features
 
@@ -40,9 +41,19 @@ Run `--help` for common options or `--help-all` for every option. [AGENTS.md](AG
 - Text subtitles in a black band with `--subtitles N` (1-based track number).
 - Experimental NVIDIA acceleration with `--experimental-cuda`.
 
-Defaults to CPU encoding. CUDA requires an NVIDIA driver and CUDA 12/13 NVRTC with its matching builtins DLL beside the executable or on PATH. It supports color, grayscale, and compact BW brushes.
-
 Brushes support sizes 2..64, defaulting to 8 on CPU and 32 on CUDA. Use `--brush-size 1` for CPU pixel mode. Ordinary BW uses pixel mode by default.
+
+<details>
+<summary>CUDA setup (optional)</summary>
+
+Install an NVIDIA driver and [CUDA Toolkit 12 or 13](https://developer.nvidia.com/cuda-downloads), including NVRTC. In PowerShell:
+
+```powershell
+$env:Path = "$env:CUDA_PATH\bin;$env:CUDA_PATH\bin\x64;$env:Path"
+```
+
+Add `--experimental-cuda` to a color, grayscale, or compact BW export. Alternatively, place `nvrtc64_120_0.dll` or `nvrtc64_130_0.dll` and the matching `nvrtc-builtins64_*.dll` from the same toolkit beside `mp42rhm.exe`. See [NVIDIA's NVRTC layout](https://docs.nvidia.com/cuda/nvrtc/index.html#installation).
+</details>
 
 ## How It Works
 
@@ -55,7 +66,25 @@ Colorsets use bare `RRGGBB` lines, 7 bytes per entry. Brush exports normally nee
 
 ## Playback
 
-Import the map and colorset, then apply the printed Note Scale, AR, SD, and background RGB. Use solid square notes, 1x speed, and Visualize (Auto). Brush maps require Note Opacity 100% and Fade Length 0.
+Import the map and matching colorset, then apply the values in `<output>-settings.txt`. Use solid square notes, 1x speed, and Visualize (Auto). Brush maps require Note Opacity 100% and Fade Length 0.
+
+Start at FOV 30. `--span 3.3` targets near-screen width for a 16:9 picture; increase FOV if it clips. Note Scale and coordinate spacing are adjusted together to the nearest two-decimal scale, with a minimum of 0.01, so the final span can differ. Screen size also depends on aspect ratio and your game settings.
+
+`--max-notes` stops an export at its budget; it does not automatically lower quality. Colorset import memory and peak notes per frame can limit playback even when encoding succeeds. Supported resolution and FPS are export limits, not performance guarantees. Large conversions also need temporary disk space beyond the final file sizes.
+
+## Building
+
+Requires Visual Studio 2022 with Desktop development with C++, CMake 3.24+, Git, and FFmpeg/ffprobe. Run from Developer PowerShell for VS 2022, or put CMake on PATH.
+
+```powershell
+git clone https://github.com/yo-ru/mp42rhm.git
+cd mp42rhm
+cmake -S . -B build -A x64
+cmake --build build --config Release
+ctest --test-dir build -C Release --output-on-failure
+```
+
+The executable is `build/Release/mp42rhm.exe`. CMake downloads rhmParse automatically. To create the Windows ZIP, run `cpack -C Release --config build/CPackConfig.cmake -B build`.
 
 ## License
 

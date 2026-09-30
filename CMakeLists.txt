@@ -5,6 +5,8 @@ if(NOT WIN32)
   message(FATAL_ERROR "This prototype uses Win32 process pipes and requires Windows.")
 endif()
 
+set(CMAKE_MSVC_RUNTIME_LIBRARY "MultiThreaded$<$<CONFIG:Debug>:Debug>")
+
 include(FetchContent)
 FetchContent_Declare(rhmparse
   GIT_REPOSITORY https://github.com/yo-ru/rhmParse.git
@@ -15,6 +17,7 @@ FetchContent_MakeAvailable(rhmparse)
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS src/cuda_brush.cu)
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/src/cuda_brush.cu" CUDA_SOURCE)
 configure_file(src/cuda_source.h.in generated/cuda_source.h @ONLY)
+configure_file(src/version.h.in generated/version.h @ONLY)
 
 add_library(converter src/converter.cpp src/process.cpp src/archive.cpp src/note_order.cpp src/cuda_brush.cpp src/brush_optimizer.cpp src/frame_rate.cpp src/subtitles.cpp)
 target_compile_features(converter PUBLIC cxx_std_17)
@@ -23,12 +26,23 @@ target_compile_definitions(converter PUBLIC WIN32_LEAN_AND_MEAN NOMINMAX)
 target_link_libraries(converter PRIVATE rhmParse::rhmParse bcrypt)
 
 add_executable(mp42rhm src/main.cpp)
+target_include_directories(mp42rhm PRIVATE "${CMAKE_CURRENT_BINARY_DIR}/generated")
 target_link_libraries(mp42rhm PRIVATE converter)
 
 if(MSVC)
   target_compile_options(converter PRIVATE /W4 /utf-8)
   target_compile_options(mp42rhm PRIVATE /W4 /utf-8)
 endif()
+
+install(TARGETS mp42rhm RUNTIME DESTINATION .)
+install(FILES README.md LICENSE AGENTS.md DESTINATION .)
+install(FILES .github/banner.svg DESTINATION .github)
+install(DIRECTORY licenses/ DESTINATION licenses)
+install(FILES "${rhmparse_SOURCE_DIR}/LICENSE" DESTINATION licenses RENAME rhmParse.txt)
+
+set(CPACK_GENERATOR ZIP)
+set(CPACK_PACKAGE_FILE_NAME "mp42rhm-${PROJECT_VERSION}-windows-x64")
+include(CPack)
 
 include(CTest)
 if(BUILD_TESTING)

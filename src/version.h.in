@@ -1,0 +1,5 @@
+#pragma once
+
+namespace mp42rhm {
+  static constexpr char VERSION[] = "@PROJECT_VERSION@";
+}

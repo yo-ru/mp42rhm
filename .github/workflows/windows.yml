@@ -1,0 +1,53 @@
+name: Windows
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install FFmpeg
+        run: choco install ffmpeg-full --yes --no-progress
+      - name: Configure
+        run: cmake -S . -B build -A x64
+      - name: Build
+        run: cmake --build build --config Release
+      - name: Test
+        run: ctest --test-dir build -C Release --output-on-failure
+      - name: Package
+        working-directory: build
+        run: cpack -C Release
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-x64
+          path: build/mp42rhm-*-windows-x64.zip
+          if-no-files-found: error
+          compression-level: 0
+
+  release:
+    if: github.event_name == 'release'
+    needs: build
+    runs-on: windows-2022
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v8
+        with:
+          name: windows-x64
+      - name: Attach Windows ZIP
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_TAG: ${{ github.event.release.tag_name }}
+        run: |
+          $package = Get-Item mp42rhm-*-windows-x64.zip
+          gh release upload "$env:RELEASE_TAG" "$($package.FullName)"

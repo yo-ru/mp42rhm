@@ -9,6 +9,7 @@
 *.sspm
 *.rhc
 *-colorset.txt
+*-settings.txt
 *.mp4
 *.mp3
 *.wav

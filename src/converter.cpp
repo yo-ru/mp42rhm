@@ -38,6 +38,13 @@ namespace mp42rhm {
     return static_cast<uint32_t>(std::stoul(hex, nullptr, 16));
   }
 
+  double note_scale(const Options& options) {
+    const double scale = (options.span == 0 ? 0.01 : options.span / options.width) * options.brush_size;
+
+    // Rhythia only accepts two decimal places
+    return std::max(0.01, std::round(scale * 100) / 100);
+  }
+
   static std::string color_hex(uint32_t color) {
     static constexpr char HEX[] = "0123456789abcdef";
     std::string result = "000000";
@@ -746,7 +753,7 @@ namespace mp42rhm {
     std::vector<BrushStroke> previous_strokes;
     std::vector<std::string> x_coordinates(options.width);
     std::vector<std::string> positions(brush_mode ? 0 : size_t(options.width) * options.height);
-    const double pitch = options.span == 0 ? 0.01 : options.span / options.width;
+    const double pitch = note_scale(options) / options.brush_size;
     Statistics statistics;
     uint32_t last_note = 0;
     std::string frame_json;
@@ -914,7 +921,7 @@ namespace mp42rhm {
         if (sspm && statistics.notes == UINT32_MAX)
           throw std::runtime_error("SSPM cannot store more than 4294967295 notes");
         if (cycle_mode && statistics.notes == INT32_MAX)
-          throw std::runtime_error("Steam Rhythia color compensation exceeds the signed array-index range");
+          throw std::runtime_error("Rhythia color compensation exceeds the signed array-index range");
         frame_json.append(prefix, !binary && statistics.notes == 0 ? 1 : 0);
         frame_json.append(position);
         ++statistics.notes;

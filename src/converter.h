@@ -48,6 +48,7 @@ namespace mp42rhm {
   };
 
   uint32_t parse_color(const std::string& text);
+  double note_scale(const Options& options);
   void validate(const Options& options);
   Statistics convert(const Options& options);
 }
