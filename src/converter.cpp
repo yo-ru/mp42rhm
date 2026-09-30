@@ -5,6 +5,7 @@
 #include "archive.h"
 #include "process.h"
 #include "note_order.h"
+#include "temporary_directory.h"
 #include <rhmParse/rhmParse.h>
 #include <bcrypt.h>
 #include <intrin.h>
@@ -151,27 +152,6 @@ namespace mp42rhm {
       (options.title.size() > UINT16_MAX || options.difficulty_name.size() > UINT16_MAX))
       throw std::runtime_error("SSPM metadata strings cannot exceed 65535 UTF-8 bytes");
   }
-
-  class TemporaryDirectory {
-  public:
-    fs::path path;
-
-    explicit TemporaryDirectory(const fs::path& parent) {
-      for (uint32_t suffix = 0; suffix < 1000; ++suffix) {
-        path = parent / (L".mp42rhm-" + std::to_wstring(GetCurrentProcessId()) +
-          L"-" + std::to_wstring(suffix));
-        if (fs::create_directory(path))
-          return;
-      }
-      throw std::runtime_error("Cannot create temporary conversion directory");
-    }
-
-    ~TemporaryDirectory() {
-      std::error_code error;
-
-      fs::remove_all(path, error);
-    }
-  };
 
   static std::string json_string(const std::string& text) {
     static constexpr char HEX[] = "0123456789abcdef";

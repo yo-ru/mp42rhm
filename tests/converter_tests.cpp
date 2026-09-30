@@ -4,6 +4,7 @@
 #include "process.h"
 #include "note_order.h"
 #include "note_order_fixtures.h"
+#include "temporary_directory.h"
 #include "miniz.h"
 #include <rhmParse/rhmParse.h>
 #include <bcrypt.h>
@@ -13,6 +14,7 @@
 #include <cmath>
 #include <cstring>
 #include <fstream>
+#include <future>
 #include <iomanip>
 #include <iostream>
 #include <iterator>
@@ -37,6 +39,35 @@ static void must_fail(Function action) {
     failed = true;
   }
   require(failed, "Expected an error");
+}
+
+static void test_temporary_cleanup(const fs::path& directory) {
+  for (bool unwind : {false, true}) {
+    fs::path path;
+    std::future<void> unlock;
+
+    try {
+      mp42rhm::TemporaryDirectory temporary(directory);
+
+      path = temporary.path;
+      const auto staged = path / L"notes.bin";
+      const HANDLE file = CreateFileW(staged.c_str(), GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
+        nullptr, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+
+      require(file != INVALID_HANDLE_VALUE, "Cannot create locked staging file");
+      unlock = std::async(std::launch::async, [file] {
+        Sleep(200);
+        CloseHandle(file);
+      });
+      if (unwind)
+        throw std::runtime_error("Simulated export failure");
+    } catch (const std::runtime_error&) {
+      if (!unwind || !unlock.valid())
+        throw;
+    }
+    unlock.get();
+    require(!fs::exists(path), "Temporary cleanup failed after a transient file lock");
+  }
 }
 
 static rhm::Rhm read_map(const fs::path& path) {
@@ -546,6 +577,7 @@ int main(int argc, char** argv) {
     const auto directory = fs::current_path() / (L"test-fixtures-" + std::to_wstring(GetTickCount64()));
 
     fs::create_directory(directory);
+    test_temporary_cleanup(directory);
     if (argc == 2 && std::string(argv[1]) == "--large") {
       test_large_archive(directory);
       fs::remove_all(directory);
@@ -1161,7 +1193,8 @@ int main(int argc, char** argv) {
 
     require(clip.frames == 1 && clip.notes == 1 && clip.duration_ms == 17, "Clip timing did not reset");
     for (const auto& entry : fs::directory_iterator(directory))
-      require(entry.path().filename().wstring().find(L".mp42rhm-") != 0, "Leaked temporary files");
+      if (entry.path().filename().wstring().find(L".mp42rhm-") == 0)
+        throw std::runtime_error("Leaked temporary files: " + entry.path().u8string());
     fs::remove_all(directory);
     std::cout << "All converter tests passed\n";
     return 0;

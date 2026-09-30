@@ -76,13 +76,13 @@ namespace mp42rhm {
   }
 
   Process::~Process() {
-    if (output)
-      CloseHandle(output);
     if (process) {
       TerminateProcess(process, 1);
       WaitForSingleObject(process, INFINITE);
       CloseHandle(process);
     }
+    if (output)
+      CloseHandle(output);
   }
 
   size_t Process::read(void* buffer, size_t size) {
